@@ -1,0 +1,33 @@
+{
+  "name": "@baton/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agent-board": "./dist/cli.js",
+    "agent-board-mcp": "./dist/mcp.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/api.d.ts",
+      "default": "./dist/api.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@baton/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "commander": "^14.0.2",
+    "cross-spawn": "^7.0.6",
+    "node-notifier": "^10.0.1",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node-notifier": "^8.0.5"
+  }
+}

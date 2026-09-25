@@ -1,0 +1,7 @@
+node_modules
+dist
+pnpm-lock.yaml
+PLAN.md
+.agent-board
+output
+.playwright-cli

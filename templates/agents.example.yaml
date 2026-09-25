@@ -1,0 +1,14 @@
+# Roles describe responsibilities and work with any tool or model.
+# Role presets are optional. Local access is generated automatically by init/server startup.
+url: http://127.0.0.1:4100
+agents:
+  planner:
+    role: planner
+  coder:
+    role: implementer
+  tester:
+    role: tester
+humans:
+  # The dashboard defaults to the first human. No login or token is needed.
+  dax:
+    display_name: Dax

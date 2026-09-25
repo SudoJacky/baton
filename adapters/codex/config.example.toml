@@ -1,0 +1,3 @@
+[mcp_servers.agent_board]
+command = "node"
+args = ["/absolute/path/to/baton/packages/client/dist/mcp.js", "--config", "/absolute/path/to/agents.yaml"]

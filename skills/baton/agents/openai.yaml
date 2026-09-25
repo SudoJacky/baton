@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Baton 协作'
+  short_description: '使用 Baton 认领任务、协调写入锁、提交交接并进行独立验收'
+  default_prompt: '使用 $baton 处理当前指定任务，先确认身份、任务状态和未读消息，再完成角色允许的工作与交接。'

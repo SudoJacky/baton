@@ -1,0 +1,26 @@
+{
+  "name": "baton",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "pnpm --filter @baton/shared build && pnpm --filter @baton/server build && pnpm --filter @baton/client build && pnpm --filter @baton/web build",
+    "typecheck": "pnpm -r typecheck && tsc -p tsconfig.templates.json",
+    "test": "vitest run",
+    "dev": "pnpm build && node packages/server/dist/main.js",
+    "dev:web": "pnpm --filter @baton/web dev",
+    "start": "node packages/server/dist/main.js",
+    "board": "node packages/client/dist/cli.js",
+    "check": "pnpm build && pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "prettier": "3.6.2",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
