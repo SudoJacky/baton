@@ -164,6 +164,19 @@ export async function createApp(
             ...parseQuery(request.params),
           };
           if (operation === 'join') return board.join(credentials(request), input);
+          if (operation.startsWith('worker_')) {
+            check(
+              request.headers['x-baton-client'] === undefined &&
+                request.headers['x-baton-human'] === undefined &&
+                request.headers['x-baton-session'] === undefined,
+              'ambiguous_identity',
+              'Worker requests use run_id only.',
+              'Do not add a human identity or session ID.',
+              401,
+            );
+            const { run_id } = schemas.worker_get_task.parse({ run_id: input.run_id });
+            return board.execute(board.workerActor(credentials(request), run_id), operation, input);
+          }
           const actor = authenticate(request);
           if (operation === 'leave') {
             schemas.leave.parse(input);

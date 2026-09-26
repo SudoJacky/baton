@@ -62,6 +62,13 @@ const inputData = async (options: Options): Promise<Record<string, unknown>> => 
   return data as Record<string, unknown>;
 };
 async function execute(operation: Operation, input: Record<string, unknown>, options: Options) {
+  if (operation.startsWith('worker_')) {
+    print(
+      await (await localClient(options)).call(operation, schemas[operation].parse(input)),
+      options,
+    );
+    return;
+  }
   if (operation === 'join') {
     const client = await localClient(options);
     print(await client.call('join', schemas.join.parse(input)), options);
@@ -90,6 +97,14 @@ function group(name: string): Command {
   return groups.get(name)!;
 }
 const commands: Record<Operation, string> = {
+  dispatch_task: 'task dispatch',
+  complete_plan: 'task complete-plan',
+  stop_worker: 'worker stop',
+  worker_get_task: 'worker get',
+  worker_post_message: 'worker message',
+  worker_submit: 'worker submit',
+  worker_review: 'worker review',
+  worker_heartbeat: 'worker heartbeat',
   join: 'join',
   leave: 'leave',
   whoami: 'whoami',

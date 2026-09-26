@@ -1,4 +1,4 @@
 interface:
   display_name: 'Baton 协作'
-  short_description: '使用 Baton 认领任务、协调写入锁、提交交接并进行独立验收'
-  default_prompt: '使用 $baton 处理当前指定任务，先确认身份、任务状态和未读消息，再完成角色允许的工作与交接。'
+  short_description: '计划批准后由主 Agent 编排，四工具 worker 完成实现与独立验收'
+  default_prompt: '使用 $baton 记录计划，在 Dashboard 批准后共用现有目录，派发 coder 和独立 tester，以四工具 worker 流程跟进实现、返工和交付。'

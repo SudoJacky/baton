@@ -2,6 +2,46 @@
 
 基于 TypeScript 的本机多 Agent 协作平台。独立会话通过 CLI 或 MCP 共享任务、消息和交接记录，人通过 Dashboard 实时观察并介入。原始设计见 [PLAN.md](PLAN.md)，当前接入方式以下文为准。
 
+## 实测案例：混合模型协作
+
+2026 年 9 月，我们在一个真实桌面应用项目中使用 Baton 完成了两轮开发：任务入口与历史能力迁移，以及协作工作区、批次展示和主任务进度改造。Astra 负责规划与协调，Sol 编码，Luna 独立验收；主会话共派生四个工作子会话。以下为脱敏后的单次会话案例，包含流程准备、设计讨论、实现和验收。
+
+**按实测语言模型用量折算，混用模型为 2,426.41 credits；保持相同 token 数量与缓存命中、全部按 Astra 单价计算为 4,913.71 credits，低 50.6%。** 这是相同用量下的模型单价比较，尚未做单个 Astra 独立完成相同需求的对照实验，不能据此宣称总 token、实际套餐用量或开发时间降低了 50.6%。
+
+### 用量与计费口径
+
+表中 token 均为精确计数，credits 四舍五入到两位小数。缓存输入单独列出，不重复计入未缓存输入。
+
+| 职责 / 模型 | 模型响应次数 | 未缓存输入 token | 缓存输入 token | 输出 token | 折算 credits |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 规划与协调 / GPT-6 Astra | 499 | 1,614,865 | 54,684,416 | 199,716 | 2,020.47 |
+| 编码 / GPT-6 Sol | 433 | 1,337,862 | 55,582,464 | 208,166 | 396.85 |
+| 独立验收 / GPT-6 Luna | 211 | 909,544 | 18,801,792 | 169,257 | 9.09 |
+| **合计** | **1,143** | **3,862,271** | **129,068,672** | **577,139** | **2,426.41** |
+
+总计 **133,508,082 token**，其中输入缓存命中率为 **97.1%**。这些数量包含多次请求重复携带的上下文，并非同等数量的新增内容。输出已包含推理 token，不再次相加。
+
+采用 2026-09-26 核对的 [OpenAI Standard credits 单价](https://learn.chatgpt.com/docs/pricing#token-rates)：每百万未缓存输入 / 缓存输入 / 输出 token，Astra 为 `250 / 25 / 1,250`，Sol 为 `50 / 5 / 250`，Luna 为 `2.5 / 0.25 / 12.5`。各模型分别按下式计算后汇总：
+
+```text
+credits = (未缓存输入 × 输入单价 + 缓存输入 × 缓存单价 + 输出 × 输出单价) / 1,000,000
+```
+
+全 Astra 比较值使用同一组 token 计数，仅统一替换单价。上述 credits 是标准单价折算值，不是账单金额，也不等于 Pro 套餐配额扣减。仅看两轮各自的实现与验收阶段，排除前置规划和设计讨论，同口径分别低 **55.8%**、**53.8%**。
+
+### 交付与观察
+
+两轮工作均有代码提交和独立验收记录。第一轮验收记录包含 1,177 项前端测试、24 项 Rust 测试和 18 项浏览器检查；第二轮包含 1,197 项前端测试和 32 项浏览器检查，以及构建和文档检查。测试数量存在重叠，不相加作为新增覆盖；浏览器使用真实 React 组件与模拟原生数据，未覆盖实际模型执行或打包桌面端。
+
+本例中，Astra 主会话仍占折算成本的 **83.3%**。主会话发出 **137 次 `wait_agent` 调用，其中 108 次超时返回**；仅发出等待调用的 137 次模型响应合计约 **529.98 credits，占总折算成本的 21.8%**。这些响应也可能处理进展与判断，不能全部视为浪费；等待时长本身没有计入估算。后续值得验证的优化方向是减少重复唤醒，把确定性的状态检查交给程序，在完成、失败或需要决策时再调用规划模型。
+
+### 数据范围与限制
+
+- 数据来自宿主 Codex 的会话日志离线分析，并非 Baton 已内置成本采集。按响应 ID 去重后汇总主会话和四个工作子会话；五个会话均与各自累计用量核对一致，8 次上下文压缩已包含在统计中。
+- 自动审批另有 **668,596 token**，另有 **4 次图像生成**；前者缺少可确认的计费依据，后者缺少独立用量记录，均未计入上述成本比较，因此结果不代表整段工作的完整账单。
+- 这是一个会话、两轮工作的案例，不能代表不同任务的平均效果。数据支持混合模型在相同用量下的成本优势，尚不能区分 Baton 编排、模型选择及任务复杂度各自带来的影响。
+- 公开内容仅保留匿名场景和汇总数据，不包含项目名称、用户名、本机路径、会话或任务 ID、提交 SHA、原始日志与截图。
+
 ## 启动
 
 需要 Node.js 24+、pnpm 11+ 和 Git。只监听 `127.0.0.1`。
@@ -44,13 +84,13 @@ pnpm board --config .agent-board/agents.yaml migrate
 
 将 [Codex MCP 示例](adapters/codex/config.example.toml) 合入用户级 MCP 配置，只需配置程序路径和 Baton 配置路径；不需要按会话配置环境变量、token 或启动包装器。同一个 MCP 可同时服务 planner、coder、tester 等会话。
 
-新会话调用：
+手动会话或 planner 首次调用（派发的 worker 不需要 join）：
 
 ```json
 { "handle": "coder", "role": "implementer" }
 ```
 
-这是 `join` 的参数。返回 `data.session_id`、参与者信息、名下任务与未读数。将 ID 留在当前会话上下文中；除 `join` 外，每次 MCP 调用都显式携带它，例如：
+这是 `join` 的参数。返回 `data.session_id`、参与者信息、名下任务与未读数。将 ID 留在当前会话上下文中；规划与手动操作显式携带它，worker 改用任务绑定的 `run_id`，例如：
 
 ```json
 { "session_id": "返回的 UUID" }
@@ -66,7 +106,7 @@ pnpm board --config .agent-board/agents.yaml migrate
 
 服务仅监听本机，校验 Host 和完整 Origin（包括协议、主机和端口），不开放 CORS，并禁止页面被嵌入。Dashboard 请求使用自动附加的非秘密自定义请求头，使其他来源网页不能用普通表单或跨站请求代替用户操作。这些防护不用于隔离本机程序。
 
-活动状态来自实际 API 请求，90 秒没有请求显示“暂无活动”；MCP 进程存在不会替任何 Agent 续活动时间。空闲不会使会话 ID 失效，活动请求也不续任务租约。关键交接使用明确的 `@coder`、`@tester`，因为 `@role:` 只发给近期活跃且未冻结的 Agent。
+活动状态来自实际 API 请求，90 秒没有请求显示“暂无活动”；空闲 MCP 不更新 Agent 活动。派发的活跃 worker 由 MCP 自动续租并更新活动时间，不追加心跳事件；它只能证明 assignment 仍受管理，不能证明模型进程存活。普通会话空闲不会使 session_id 失效。关键交接使用明确的 `@coder`、`@tester`，因为 `@role:` 只发给近期活跃且未冻结的 Agent。
 
 ## CLI 与可选包装器
 
@@ -95,7 +135,9 @@ pnpm board --config .agent-board/agents.yaml run --as coder -- your-agent-cli
 
 ## Agent 使用技能
 
-[Baton 技能](skills/baton/SKILL.md) 提供按需使用的查看、规划、执行和独立验收流程，以及 CLI / MCP 操作参考。将整个 `skills/baton` 目录复制到 `~/.codex/skills/baton`；设置了 `CODEX_HOME` 时，改放在其 `skills/baton` 下。技能源码保留在本仓库，更新后同步个人目录。
+[Baton 技能](skills/baton/SKILL.md) 提供查看、单任务执行和主子 Agent 协作流程，以及 CLI / MCP 操作参考。主 Agent 作为 planner 记录计划并调度同级的 coder（`gpt-6-sol` / `xhigh`）与 tester（`gpt-6-luna` / `xhigh`），跟进独立验收与返工。将整个 `skills/baton` 目录复制到 `~/.codex/skills/baton`；设置了 `CODEX_HOME` 时，改放在其 `skills/baton` 下。技能源码保留在本仓库，更新后同步个人目录。
+
+默认在项目现有目录和当前分支串行完成“实现 → 提交 → 独立验收 → 返工或完成”，不额外创建 worktree、clone、任务分支或合并步骤。tester 验收时 coder 停止修改，主 Agent 暂停同目录的下一项写入安排；只有明确需要并行或隔离时，才选择独立目录。任务仍绑定真实 Git 仓库，并以完整 commit SHA 交接。
 
 接入 Baton 后，首次指定身份，技能会先加入并记住会话 ID：
 
@@ -103,56 +145,48 @@ pnpm board --config .agent-board/agents.yaml run --as coder -- your-agent-cli
 $baton 以 coder 身份加入，角色为 implementer，查看当前工作，不领取任务。
 $baton 处理 T-42，完成验证后提交独立验收。
 $baton 验收 T-42 的提交，遇到人工审批点时提交申请。
+$baton 由你担任 planner，将当前需求写入看板并调度子 Agent：coder 使用 gpt-6-sol xhigh，tester 使用 gpt-6-luna xhigh，跟进实现、独立验收和返工。
 ```
 
-技能不会替你启动服务、配置 MCP、创建新 Agent 或授予人工权限。其他工具也可以直接读取 `SKILL.md` 及其相对引用的操作参考，不依赖 Codex 专属 API。
+子 Agent 模式需要宿主支持委派和所选模型；只查看或处理单个角色任务时不会自动派生 Agent。技能不会替你启动服务、配置 MCP 或授予人工权限。默认计划批准后子任务自动推进，普通验收没有最终人工 gate；保留自定义审批模式。主会话停止后没有后台调度器继续执行。具体身份、交接和集成边界见 [编排流程](skills/baton/references/orchestration.md)。其他工具也可以直接读取 `SKILL.md` 及其相对引用的参考，按宿主实际能力执行。
 
 ## 任务与交接
 
 共享的 Zod schema、状态图和命令目录位于 `packages/shared`。CLI、MCP、HTTP 共用服务端的状态机与所声明身份的权限检查；Agent 应始终使用自己的会话，不能借人工入口绕过审批。
 
-```sh
-# planner：实现任务先建草稿，再申请发布
-agent-board task create --title "Implement inbox" --type implement --repository /absolute/path/to/repo --role-hint implementer --draft --json
-agent-board task approval 1 --to-status open --reason "Plan is ready" --json
+Dashboard 的任务详情顶部提供“取消任务”：填写原因并确认后，保留任务与讨论历史，释放该任务的写入锁，并移除它的待审批申请和异常待办。取消前请确认执行者已停止；取消不会修改仓库文件，也不会自动取消关联任务；有未结束子任务的计划需先处理子任务。旧任务取消后可正常创建新任务，在看板勾选“显示已结束”可查看取消记录。已完成或已取消的任务不能再次取消或重新开启。
 
-# human：也可以直接在 Dashboard 审批
-agent-board --as dax approve 1 --to-status open --reason "Approved for implementation" --json
+默认 MCP 提供 planner 的规划/派发工具，以及 worker 的 `get_task`、`post_message`、`submit`、`review` 四个常用工具。完整手动工具仍可通过全局参数 `--profile full` 使用，CLI 保留全部操作。
 
-# coder：认领不等于取得写入权，进入 in_progress 成功后才能写
-agent-board task claim 1 --json
-agent-board task update 1 --status in_progress --json
-agent-board inbox --json
+```text
+planner: join → create_task(type=plan) → create_task(parent_id=计划ID, ...)
+planner: request_approval(计划ID, to_status=open)
+human:   Dashboard「批准计划」
+planner: dispatch_task(任务ID, handle=coder, mode=implement) → 启动子 Agent
+coder:   get_task(run_id) → 实现、自测、Git 提交 → submit(run_id, summary, commit_sha)
+planner: dispatch_task(任务ID, handle=tester, mode=review) → 启动独立子 Agent
+tester:  get_task(run_id) → 独立检查 → review(run_id, verdict, comments, commit_sha, criteria_passed)
+planner: 返工则重新派发原 coder；全部完成后 complete_plan
 ```
 
-结构化参数建议通过文件传入，避免不同 shell 的 JSON 转义差异：
+`dispatch_task` 原子准备身份、认领、状态和锁，**不启动模型**；主 Agent 使用宿主提供的子 Agent 工具启动执行者，传入 run_id 和任务上下文。一个共享 MCP 可同时承载所有身份，无需逐会话配置。worker 不再自己 join、续租、操作收件箱或单独勾选标准；验收结论与勾选由服务端原子写入。
 
-```json
-{
-  "summary": "Implemented and verified the inbox",
-  "artifacts": [{ "kind": "commit", "ref": "FULL_40_OR_64_CHARACTER_SHA" }],
-  "reviewer": "tester"
-}
-```
-
-```sh
-agent-board task submit 1 --data-file submit.json --json
-agent-board task review 1 --verdict changes_requested --comments "Please address the failing test" --json
-```
+每轮派发有独立 run_id，完成后不能再用于修改；相同活跃派发重试返回同一 ID，主 Agent不能据此重复启动 worker。MCP 为活跃 assignment 自动续租，连接中断后到期保留目录和锁，通知协调者恢复。实际 worker 崩溃需主 Agent 确认停止后调用 stop_worker，不能把 MCP 连接误当作模型存活证明。
 
 将临时输入文件放到忽略目录，或写到仓库外。代码任务提交要求：完整 commit SHA、SHA 等于任务仓库 HEAD、工作目录干净（含未跟踪文件）、仍持有该任务写入锁。任一检查失败都会保留原状态与锁。
 
 默认策略：
 
-- 实现任务发布、规划与实现任务最终验收必须由人批准。已授权的 reviewer 遇到审批点也能申请人工审批。
+- 默认只审批 plan 发布。先建齐范围、子任务及代码仓库，在 Dashboard 批准计划后，子任务可依赖顺序运行；普通实现和最终验收无需再批准。批准后范围锁定，新增工作使用后续计划。人直接创建的独立任务仍可单独执行；旧任务不被回填为已批准计划。
 - 验收标准只能在 `in_review` 阶段由独立验收者或非负责人的人类参与者勾选。负责人不能给自己验收；退回修改后清空勾选记录。
-- implement / bug 一律需要目标仓库的写入锁；其他任务可在创建时设 `writes_code=true`。每个 Agent 默认最多预留或执行 1 项任务，`blocked` 也占用名额。
+- implement / bug / merge 一律需要目标仓库的写入锁；其他任务可在创建时设 `writes_code=true`。每个 Agent 默认最多预留或执行 1 项任务，`blocked` 也占用名额。
 - `blocked` 不参与租约到期，保留负责人和待处理状态。租约到期和冻结均不释放写入锁；持锁任务到期只通知人，其他可过期任务回到待认领。
 - 人工强制释放写入锁会同时冻结原写者任务。人检查工作目录后，可以改派、恢复或取消任务。
 - 返工达到 3 次时升级为 blocked 并通知人；Agent 无法自行恢复超过上限的任务。
-- 实际请求更新活动时间，不追加心跳事件、不续租。任务用 `update_task` 续租，默认 30 分钟。
-- 前置任务取消不会自动被视为完成。人可在详情编辑依赖，或调用 `update_task(depends_on=[...])` 移除/替换前置任务；拒绝循环依赖，执行中和待验收阶段不能修改依赖。
-- `settings set` 只更新传入字段，其余策略保留；传入的 gates 数组或 roles 对象替换对应字段。
+- 管理的 worker 由 MCP 自动续租，普通手动任务用 `update_task` 续租，默认 30 分钟。管理流程从编码到独立验收一直保留仓库锁，阻止下一项任务提前修改。
+- 设置页可选“分支合入前需要人工审批”，只作用于 merge 任务。默认共享当前分支无需 merge 任务；服务器不自动执行 Git。实际合入冲突由 worker 报告，服务端冻结任务并通知人。
+- 前置任务取消不会自动被视为完成。已批准计划的依赖锁定，需要取消受影响任务并创建后续计划；未锁定的任务可在详情编辑依赖，或调用 `update_task(depends_on=[...])` 移除/替换前置任务；拒绝循环依赖，执行中和待验收阶段不能修改依赖。
+- 设置页默认“仅审批计划”；自定义模式才使用 gates JSON。升级旧默认策略时自动采用计划模式，旧自定义 gates 保留为 custom。`settings set` 只更新传入字段，其余策略保留；传入的 gates 数组或 roles 对象替换对应字段。
 
 这些是平台任务状态的强制约束；写入锁不是操作系统文件权限沙箱，无法阻止未接入平台的编辑器或任意 shell 命令修改文件。参与者仍须遵守角色约定。
 

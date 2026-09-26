@@ -24,6 +24,7 @@ export const typeNames = {
   review: '审查',
   bug: '缺陷',
   question: '问题',
+  merge: '合入',
 };
 export const errorText = (error: unknown) =>
   error instanceof ApiError

@@ -48,6 +48,8 @@ async function fixture(
     ...(options.realGit ? {} : { verifyCommit: () => {} }),
     ...(options.verifyCommit ? { verifyCommit: options.verifyCommit } : {}),
   });
+  // Existing tests exercise the advanced/custom transition policy explicitly.
+  await board.execute(board.localHuman(), 'put_settings', { approval_mode: 'custom' });
   const app = await createApp(board, { sweepInterval: 1000000 });
   cleanup.push(async () => {
     await app.close();
@@ -381,6 +383,32 @@ describe('task collaboration and server-enforced policy', () => {
       (await f.call('dax', 'PATCH', `/tasks/${downstream.id}`, { depends_on: [] })).status,
     ).toBe(200);
     expect((await f.call('coder', 'POST', `/tasks/${downstream.id}/claim`, {})).status).toBe(200);
+  });
+  it('removes cancelled frozen tasks from attention while preserving their history', async () => {
+    const f = await fixture();
+    const obsolete = await f.create({ title: 'Obsolete frozen task' });
+    const active = await f.create({ title: 'Active frozen task' });
+    for (const task of [obsolete, active])
+      expect((await f.call('dax', 'PATCH', `/tasks/${task.id}`, { frozen: true })).status).toBe(
+        200,
+      );
+    const attention = async () =>
+      (await f.call('dax', 'GET', '/overview')).body.data.attention.map((task: Task) => task.id);
+    expect(await attention()).toEqual([obsolete.id, active.id]);
+    expect(
+      (
+        await f.call('dax', 'POST', `/tasks/${obsolete.id}/transition`, {
+          status: 'cancelled',
+          reason: 'Replaced by a new plan',
+        })
+      ).status,
+    ).toBe(200);
+    expect(await attention()).toEqual([active.id]);
+    expect((await f.call('dax', 'GET', `/tasks/${obsolete.id}`)).body.data).toMatchObject({
+      status: 'cancelled',
+      frozen: true,
+      title: 'Obsolete frozen task',
+    });
   });
   it('reassigns through valid transitions and supersedes outstanding approvals', async () => {
     const f = await fixture();
@@ -924,6 +952,10 @@ describe('repositories selected per task', () => {
     board.store.run('DROP TABLE write_locks');
     board.store.run('DROP INDEX tasks_repository');
     board.store.run('ALTER TABLE tasks DROP COLUMN repository');
+    board.store.run('DROP TABLE worker_runs');
+    board.store.run('ALTER TABLE tasks DROP COLUMN plan_approved_at');
+    board.store.run('ALTER TABLE tasks DROP COLUMN plan_approved_by');
+    board.store.run('ALTER TABLE tasks DROP COLUMN workflow_plan');
     board.store.run('PRAGMA user_version=3');
     board.close();
     board = undefined;
@@ -1034,11 +1066,15 @@ describe('messaging, presence, authentication and replay', () => {
       'CREATE TABLE write_lock (id INTEGER PRIMARY KEY, holder TEXT, task_id INTEGER, acquired_at TEXT)',
     );
     board.store.run('INSERT INTO write_lock(id) VALUES(1)');
+    board.store.run('DROP TABLE worker_runs');
+    board.store.run('ALTER TABLE tasks DROP COLUMN plan_approved_at');
+    board.store.run('ALTER TABLE tasks DROP COLUMN plan_approved_by');
+    board.store.run('ALTER TABLE tasks DROP COLUMN workflow_plan');
     board.store.run('PRAGMA user_version=1');
     board.close();
     active = undefined;
     board = open(config);
-    expect(board.store.get<{ user_version: number }>('PRAGMA user_version')?.user_version).toBe(4);
+    expect(board.store.get<{ user_version: number }>('PRAGMA user_version')?.user_version).toBe(5);
     expect(() => board.authenticate(agentToken, oldSession)).toThrow();
     expect(board.localHuman().frozen).toBe(false);
     expect(() => board.authenticate(token('dax'))).toThrow();

@@ -164,6 +164,14 @@ code,
 .button.primary:hover {
   background: #2e4229;
 }
+.button.danger {
+  color: #9e412f;
+  background: #fff7f5;
+  border-color: #efd6cf;
+}
+.button.danger:hover {
+  background: #fceae5;
+}
 .button.subtle {
   background: transparent;
 }
@@ -1122,6 +1130,7 @@ code,
   font-size: 9px;
 }
 .dialog {
+  margin: auto;
   border: 1px solid #dbe2d1;
   border-radius: 13px;
   padding: 0;
@@ -1187,6 +1196,13 @@ code,
   align-items: center;
   justify-content: flex-end;
   margin-top: 3px;
+}
+.task-detail-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .task-detail-heading h1 {
   font-size: 23px;

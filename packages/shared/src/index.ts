@@ -11,7 +11,15 @@ export const statuses = [
   'done',
   'cancelled',
 ] as const;
-export const taskTypes = ['plan', 'implement', 'test', 'review', 'bug', 'question'] as const;
+export const taskTypes = [
+  'plan',
+  'implement',
+  'test',
+  'review',
+  'bug',
+  'question',
+  'merge',
+] as const;
 export const statusSchema = z.enum(statuses);
 export const taskTypeSchema = z.enum(taskTypes);
 export const handleSchema = z
@@ -33,6 +41,8 @@ export const gateSchema = z
   .strict();
 export const settingsSchema = z
   .object({
+    approval_mode: z.enum(['plan', 'custom']).default('plan'),
+    merge_approval: z.boolean().default(false),
     gates: z.array(gateSchema).default([
       { from: 'draft', to: 'open', types: ['implement'] },
       { from: 'in_review', to: 'done', types: ['plan', 'implement'] },
@@ -71,6 +81,12 @@ export function isGated(
   to: TaskStatus,
   type: TaskType,
 ): boolean {
+  if (settings.approval_mode === 'plan')
+    return (
+      from === 'draft' &&
+      to === 'open' &&
+      (type === 'plan' || (type === 'merge' && settings.merge_approval))
+    );
   return settings.gates.some((g) => g.from === from && g.to === to && g.types.includes(type));
 }
 
@@ -104,6 +120,50 @@ export const schemas = {
     })
     .strict(),
   get_task: z.object({ id: idSchema, include_thread: z.boolean().default(false) }).strict(),
+  dispatch_task: z
+    .object({ id: idSchema, handle: handleSchema, mode: z.enum(['implement', 'review']) })
+    .strict(),
+  stop_worker: z.object({ run_id: z.string().uuid(), reason: text }).strict(),
+  complete_plan: z
+    .object({
+      id: idSchema,
+      summary: text,
+      criteria_passed: z.array(idSchema).max(100).default([]),
+    })
+    .strict(),
+  worker_get_task: z.object({ run_id: z.string().uuid() }).strict(),
+  worker_heartbeat: z.object({ run_id: z.string().uuid() }).strict(),
+  worker_post_message: z
+    .object({
+      run_id: z.string().uuid(),
+      body: text,
+      kind: z.enum(['comment', 'question', 'report']).default('comment'),
+      escalation: z.literal('merge_conflict').optional(),
+    })
+    .strict(),
+  worker_submit: z
+    .object({
+      run_id: z.string().uuid(),
+      summary: text,
+      commit_sha: z
+        .string()
+        .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i)
+        .optional(),
+      artifacts: z.array(artifactSchema).max(99).default([]),
+    })
+    .strict(),
+  worker_review: z
+    .object({
+      run_id: z.string().uuid(),
+      verdict: z.enum(['approve', 'changes_requested']),
+      comments: text,
+      criteria_passed: z.array(idSchema).max(100).default([]),
+      commit_sha: z
+        .string()
+        .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i)
+        .optional(),
+    })
+    .strict(),
   create_task: z
     .object({
       title: z.string().trim().min(1).max(240),
@@ -241,6 +301,8 @@ export const schemas = {
   get_settings: z.object({}).strict(),
   put_settings: z
     .object({
+      approval_mode: settingsSchema.shape.approval_mode.removeDefault().optional(),
+      merge_approval: settingsSchema.shape.merge_approval.removeDefault().optional(),
       gates: settingsSchema.shape.gates.removeDefault().optional(),
       lease_minutes: settingsSchema.shape.lease_minutes.removeDefault().optional(),
       max_in_progress: settingsSchema.shape.max_in_progress.removeDefault().optional(),
@@ -264,6 +326,52 @@ type Route = {
   human?: boolean;
 };
 export const operations: Record<Operation, Route> = {
+  dispatch_task: {
+    method: 'POST',
+    path: '/tasks/:id/dispatch',
+    description:
+      'Planner dispatches one implementation or independent review. Atomically prepares identity, claim and lock; returns a task-bound run_id for the worker. Does not launch a model.',
+  },
+  stop_worker: {
+    method: 'POST',
+    path: '/workers/:run_id/stop',
+    description:
+      'Coordinator stops a worker assignment after confirming its model has stopped. Preserves working files and locks.',
+  },
+  complete_plan: {
+    method: 'POST',
+    path: '/tasks/:id/complete-plan',
+    description:
+      'Planner closes an approved plan after all descendants have completed or been cancelled by a human.',
+  },
+  worker_get_task: {
+    method: 'GET',
+    path: '/workers/:run_id',
+    description: 'Read the assigned task, discussion, review SHA and worker state.',
+  },
+  worker_heartbeat: {
+    method: 'POST',
+    path: '/workers/:run_id/heartbeat',
+    description: 'Transport-managed worker lease renewal; not a model tool.',
+  },
+  worker_post_message: {
+    method: 'POST',
+    path: '/workers/:run_id/messages',
+    description:
+      'Post to the assigned task. Report a merge_conflict to stop integration and notify the human.',
+  },
+  worker_submit: {
+    method: 'POST',
+    path: '/workers/:run_id/submit',
+    description:
+      'Submit the assigned implementation with summary and full commit_sha. Server handles state and handoff.',
+  },
+  worker_review: {
+    method: 'POST',
+    path: '/workers/:run_id/review',
+    description:
+      'Independently review the assigned submission. Approve only with every verified criterion ID in criteria_passed; otherwise request changes with evidence.',
+  },
   join: {
     method: 'POST',
     path: '/agents/join',
@@ -310,7 +418,7 @@ export const operations: Record<Operation, Route> = {
     method: 'POST',
     path: '/tasks',
     description:
-      'Create work with structured acceptance criteria and handoff context. Use repository for the absolute local Git working-tree path; a cross-repository plan may omit it. Code tasks must select a repository before starting. Use draft=true when publication requires human approval.',
+      'Create a draft plan and all its children before requesting plan approval. Code children require parent_id and an absolute repository in default plan mode. Approved scope is locked. Merge tasks start as drafts; their optional gate is controlled by merge_approval. Custom mode follows gates.',
   },
   claim_task: {
     method: 'POST',
@@ -485,6 +593,9 @@ export interface Participant {
   };
 }
 export interface TaskSummary {
+  workflow_plan: boolean;
+  plan_approved_at: string | null;
+  plan_approved_by: string | null;
   repository: string | null;
   id: number;
   title: string;
@@ -524,6 +635,15 @@ export interface Task extends TaskSummary {
   artifacts: Artifact[];
   labels: string[];
   thread?: Message[];
+}
+export interface WorkerAssignment {
+  run_id: string;
+  mode: 'implement' | 'review';
+  state: 'active' | 'completed' | 'stopped' | 'expired';
+  handle: string;
+  task: Task;
+  commit_sha: string | null;
+  heartbeat_after_ms: number;
 }
 export interface Message {
   id: number;

@@ -29,20 +29,33 @@ import {
   type TaskStatus,
   type TaskSummary,
   type WriteLock,
+  type WorkerAssignment,
 } from '@baton/shared';
 import { Store } from './database.js';
 import { requireCondition as check } from './errors.js';
 import { resolveRepository, verifyCommit } from './git.js';
 
 type ParticipantRow = Omit<Participant, 'frozen'> & { frozen: number };
-type TaskRow = Omit<TaskSummary, 'frozen' | 'writes_code'> & {
+type TaskRow = Omit<TaskSummary, 'frozen' | 'writes_code' | 'workflow_plan'> & {
   description: string;
   reviewer: string | null;
   context: string;
   frozen: number;
   writes_code: number;
+  workflow_plan: number;
 };
 type EventRow = Omit<BoardEvent, 'payload'> & { payload: string; audience: string | null };
+type WorkerRun = {
+  id: string;
+  task_id: number;
+  handle: string;
+  coordinator: string;
+  mode: WorkerAssignment['mode'];
+  state: WorkerAssignment['state'];
+  commit_sha: string | null;
+  lease_until: string;
+  created_at: string;
+};
 const participantColumns = 'handle,kind,role,display_name,status,status_note,frozen,last_seen_at';
 const activeStatuses = ['claimed', 'in_progress', 'blocked', 'changes_requested'];
 const leasedStatuses = ['claimed', 'in_progress', 'changes_requested'];
@@ -116,6 +129,27 @@ export class Board {
         "INSERT OR IGNORE INTO settings(key,value) VALUES('policy',?)",
         JSON.stringify(settingsSchema.parse({})),
       );
+      const saved = JSON.parse(
+        this.store.get<{ value: string }>("SELECT value FROM settings WHERE key='policy'")!.value,
+      ) as Record<string, unknown>;
+      if (saved.approval_mode === undefined) {
+        // Adopt the new default only for the former stock policy; preserve custom policies.
+        const defaults = settingsSchema.parse({});
+        saved.approval_mode =
+          JSON.stringify(saved.gates) === JSON.stringify(defaults.gates) ? 'plan' : 'custom';
+        const roles = saved.roles as Record<string, string[]> | undefined;
+        if (
+          roles?.planner &&
+          JSON.stringify([...roles.planner].sort()) ===
+            JSON.stringify(defaults.roles.planner!.filter((type) => type !== 'merge').sort())
+        )
+          roles.planner.push('merge');
+        this.store.run(
+          "UPDATE settings SET value=? WHERE key='policy'",
+          JSON.stringify(settingsSchema.parse(saved)),
+        );
+        this.event(null, 'settings.migrated', null, { approval_mode: saved.approval_mode });
+      }
     });
   }
   now(): number {
@@ -398,6 +432,7 @@ export class Board {
       context: JSON.parse(row.context) as Record<string, unknown>,
       frozen: Boolean(row.frozen),
       writes_code: Boolean(row.writes_code),
+      workflow_plan: Boolean(row.workflow_plan),
       depends_on: this.store
         .all<{
           depends_on_id: number;
@@ -415,7 +450,12 @@ export class Board {
   }
   private summary(row: TaskRow): TaskSummary {
     const { description: _description, context: _context, ...rest } = row;
-    return { ...rest, writes_code: Boolean(row.writes_code), frozen: Boolean(row.frozen) };
+    return {
+      ...rest,
+      writes_code: Boolean(row.writes_code),
+      workflow_plan: Boolean(row.workflow_plan),
+      frozen: Boolean(row.frozen),
+    };
   }
   private listTasks(actor: Participant, input: Parsed<'list_tasks'>): TaskSummary[] {
     const where: string[] = [];
@@ -551,6 +591,7 @@ export class Board {
     });
   }
   private changeStatus(actor: Participant, task: Task, status: TaskStatus, reason: string): void {
+    if (['claimed', 'in_progress'].includes(status)) this.executionApproved(task);
     check(
       transitions[task.status].includes(status),
       'invalid_transition',
@@ -598,7 +639,13 @@ export class Board {
       );
       this.lockFor(actor, task);
     }
-    if (['in_review', 'done', 'cancelled'].includes(status)) this.unlockTask(actor.handle, task);
+    const managed = this.store.get(
+      "SELECT 1 FROM worker_runs WHERE task_id=? AND state='active'",
+      task.id,
+    );
+    // Managed shared-directory work reserves the repository through independent review.
+    if (['done', 'cancelled'].includes(status) || (status === 'in_review' && !managed))
+      this.unlockTask(actor.handle, task);
     const hasLease = leasedStatuses.includes(status) && task.assignee !== null;
     this.store.run(
       'UPDATE tasks SET status=?,lease_until=?,lease_expired_at=NULL,updated_at=? WHERE id=?',
@@ -620,6 +667,22 @@ export class Board {
       reason,
       assignee: task.assignee,
     });
+    if (managed)
+      this.store.run(
+        `UPDATE worker_runs SET state=CASE
+        WHEN (mode='implement' AND ?='in_review') OR (mode='review' AND ? IN ('done','changes_requested')) THEN 'completed' ELSE 'stopped' END
+        WHERE task_id=? AND state='active' AND ((mode='implement' AND ?!='in_progress') OR (mode='review' AND ?!='in_review'))`,
+        status,
+        status,
+        task.id,
+        status,
+        status,
+      );
+    if (managed)
+      this.store.run(
+        "DELETE FROM sessions WHERE id IN (SELECT id FROM worker_runs WHERE task_id=? AND state!='active')",
+        task.id,
+      );
   }
   private addArtifacts(actor: Participant, taskId: number, artifacts: ArtifactInput[]): void {
     for (const a of artifacts) {
@@ -637,6 +700,36 @@ export class Board {
     }
   }
   private createTask(actor: Participant, p: Parsed<'create_task'>): Task {
+    if (this.settings().approval_mode === 'plan') {
+      if (p.type === 'plan') {
+        check(
+          !p.parent_id && !p.writes_code,
+          'invalid_plan',
+          'A plan is a top-level, non-writing container.',
+          'Create implementation tasks under the plan.',
+          400,
+        );
+        p.draft = true;
+      } else if (p.type === 'merge') p.draft = true;
+      const plan = p.parent_id ? this.planFor(this.task(p.parent_id)) : undefined;
+      check(
+        !plan?.plan_approved_at,
+        'plan_scope_locked',
+        'This plan has already been approved.',
+        'Create a follow-up plan for additional scope.',
+      );
+      if (
+        actor.kind === 'agent' &&
+        (p.writes_code || ['implement', 'bug', 'merge'].includes(p.type))
+      )
+        check(
+          plan,
+          'plan_required',
+          'Agent-created code work must belong to a plan.',
+          'Create a draft plan and its child tasks, then request plan approval.',
+          403,
+        );
+    }
     check(
       actor.kind === 'human' || this.settings().roles[actor.role ?? '']?.includes(p.type),
       'role_forbidden',
@@ -660,7 +753,7 @@ export class Board {
       );
     for (const dep of p.depends_on) this.task(dep);
     const result = this.store.run(
-      `INSERT INTO tasks(title,description,type,status,priority,creator,role_hint,parent_id,context,writes_code,created_at,updated_at,repository) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO tasks(title,description,type,status,priority,creator,role_hint,parent_id,context,writes_code,created_at,updated_at,repository,workflow_plan) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       p.title,
       p.description,
       p.type,
@@ -670,10 +763,11 @@ export class Board {
       p.role_hint ?? null,
       p.parent_id ?? null,
       JSON.stringify(p.context),
-      Number(p.writes_code || ['implement', 'bug'].includes(p.type)),
+      Number(p.writes_code || ['implement', 'bug', 'merge'].includes(p.type)),
       this.timestamp(),
       this.timestamp(),
       p.repository ?? null,
+      Number(p.type === 'plan' && this.settings().approval_mode === 'plan'),
     );
     for (const dep of new Set(p.depends_on))
       this.store.run('INSERT INTO task_dependencies VALUES(?,?)', result.id, dep);
@@ -691,9 +785,406 @@ export class Board {
     this.event(actor.handle, 'task.created', task.id, { task });
     return task;
   }
+  private planFor(task: Task): Task | undefined {
+    if (task.workflow_plan) return task;
+    return task.parent_id ? this.planFor(this.task(task.parent_id)) : undefined;
+  }
+  private canExecute(task: Task): boolean {
+    if (this.settings().approval_mode !== 'plan') return true;
+    const plan = this.planFor(task);
+    return (
+      !task.workflow_plan &&
+      (!plan || Boolean(plan.plan_approved_at && plan.status === 'open' && !plan.frozen))
+    );
+  }
+  private executionApproved(task: Task): void {
+    check(
+      this.canExecute(task),
+      'plan_approval_required',
+      'The plan must be approved before its tasks can run.',
+      'Request publication of the draft plan in Dashboard. Plans are containers; dispatch their children.',
+      403,
+    );
+  }
+  private completePlan(actor: Participant, p: Parsed<'complete_plan'>): Task {
+    const plan = this.task(p.id);
+    this.writable(actor, plan);
+    check(
+      actor.kind === 'human' || actor.role === 'planner',
+      'planner_required',
+      'Only the planner can complete a plan.',
+      'Return to the coordinator.',
+      403,
+    );
+    check(
+      plan.type === 'plan' && plan.plan_approved_at && plan.status === 'open',
+      'plan_not_approved',
+      'Only an approved open plan can be completed.',
+      'Read the plan and its approval state.',
+    );
+    const children = this.store.all<{ id: number; status: string }>(
+      `WITH RECURSIVE children(id,status) AS (
+      SELECT id,status FROM tasks WHERE parent_id=? UNION ALL
+      SELECT t.id,t.status FROM tasks t JOIN children c ON t.parent_id=c.id
+    ) SELECT * FROM children`,
+      plan.id,
+    );
+    check(
+      children.length && children.every((t) => ['done', 'cancelled'].includes(t.status)),
+      'plan_incomplete',
+      'The plan still has unfinished work, or contains no tasks.',
+      'Finish its children before completing the plan.',
+    );
+    check(
+      p.criteria_passed.every((id) => plan.acceptance_criteria.some((c) => c.id === id)) &&
+        plan.acceptance_criteria.every((c) => p.criteria_passed.includes(c.id)),
+      'criteria_incomplete',
+      'The plan criteria still need verification against the reviewed deliverables.',
+      'Supply each verified plan criterion ID in criteria_passed.',
+    );
+    this.store.run(
+      'UPDATE acceptance_criteria SET checked=1,checked_by=? WHERE task_id=?',
+      actor.handle,
+      plan.id,
+    );
+    this.store.run(
+      "UPDATE tasks SET status='done',updated_at=? WHERE id=?",
+      this.timestamp(),
+      plan.id,
+    );
+    this.event(actor.handle, 'task.status_changed', plan.id, {
+      from: 'open',
+      to: 'done',
+      reason: p.summary,
+    });
+    this.systemMessage(actor, plan.id, `计划完成：${p.summary}`, [], 'report');
+    return this.task(plan.id);
+  }
+  private run(id: string): WorkerRun {
+    const run = this.store.get<WorkerRun>('SELECT * FROM worker_runs WHERE id=?', id);
+    check(
+      run,
+      'worker_not_found',
+      'This worker assignment does not exist.',
+      'Use the run_id returned by dispatch_task.',
+      404,
+    );
+    return run;
+  }
+  workerActor(token: string | undefined, id: string): Participant {
+    this.agentAccess(token);
+    return this.participant(this.run(id).handle);
+  }
+  private assignment(run: WorkerRun): WorkerAssignment {
+    const task = this.task(run.task_id);
+    task.thread = this.thread(this.participant(run.handle), {
+      task_id: task.id,
+      since: 0,
+      limit: 100,
+    });
+    return {
+      run_id: run.id,
+      mode: run.mode,
+      state: run.state,
+      handle: run.handle,
+      task,
+      commit_sha: run.commit_sha,
+      heartbeat_after_ms: Math.max(100, Math.min(10000, this.settings().lease_minutes * 20000)),
+    };
+  }
+  private activeRun(actor: Participant, id: string, mode?: WorkerRun['mode']): WorkerRun {
+    const run = this.run(id);
+    const task = this.task(run.task_id);
+    this.writable(actor, task);
+    check(
+      actor.handle === run.handle &&
+        run.state === 'active' &&
+        run.lease_until > this.timestamp() &&
+        (!mode || run.mode === mode) &&
+        (run.mode === 'implement'
+          ? task.status === 'in_progress' && task.assignee === run.handle
+          : task.status === 'in_review' && task.reviewer === run.handle),
+      'worker_inactive',
+      'This worker no longer owns this phase of the task.',
+      'Return to the coordinator; do not reuse an old run_id.',
+    );
+    this.executionApproved(task);
+    return run;
+  }
+  private dispatch(actor: Participant, p: Parsed<'dispatch_task'>): WorkerAssignment {
+    check(
+      actor.kind === 'human' || actor.role === 'planner',
+      'planner_required',
+      'Only the planner may dispatch workers.',
+      'Return to the coordinator.',
+      403,
+    );
+    let task = this.task(p.id);
+    this.writable(actor, task);
+    this.executionApproved(task);
+    check(
+      task.type !== 'plan',
+      'plan_container',
+      'Dispatch a child task, not the plan.',
+      'Read the plan children.',
+    );
+    const existing = this.store.get<WorkerRun>(
+      "SELECT * FROM worker_runs WHERE task_id=? AND state='active'",
+      task.id,
+    );
+    if (existing) {
+      check(
+        existing.coordinator === actor.handle &&
+          existing.handle === p.handle &&
+          existing.mode === p.mode,
+        'worker_active',
+        'This task already has an active worker.',
+        'Follow up the existing worker; stop it before replacing it.',
+      );
+      this.activeRun(this.participant(existing.handle), existing.id, p.mode);
+      return this.assignment(existing);
+    }
+    const role = p.mode === 'implement' ? 'implementer' : 'tester';
+    const previous = this.store.get<{ kind: string; role: string; enabled: number }>(
+      'SELECT kind,role,enabled FROM participants WHERE handle=?',
+      p.handle,
+    );
+    if (!previous)
+      this.store.run(
+        "INSERT INTO participants(handle,kind,role,token_hash,status,enabled,managed) VALUES(?,'agent',?,?,'offline',1,0)",
+        p.handle,
+        role,
+        `agent:${p.handle}`,
+      );
+    const worker = this.participant(p.handle);
+    this.writable(worker, task);
+    check(
+      worker.kind === 'agent' &&
+        (p.mode === 'implement'
+          ? worker.role === 'implementer'
+          : ['tester', 'reviewer'].includes(worker.role ?? '')),
+      'worker_role_mismatch',
+      'The worker role does not match its assignment.',
+      'Choose an implementer for coding or an independent tester/reviewer.',
+      403,
+    );
+    if (p.mode === 'implement') {
+      check(
+        task.status !== 'draft' || !isGated(this.settings(), 'draft', 'open', task.type),
+        'approval_required',
+        'Dispatch requires approval to publish this task.',
+        'Request approval for the open transition in Dashboard.',
+        403,
+      );
+      if (task.status === 'draft' && !isGated(this.settings(), 'draft', 'open', task.type)) {
+        this.changeStatus(actor, task, 'open', 'Published for dispatch');
+        task = this.task(task.id);
+      }
+      if (task.status === 'open') task = this.claim(worker, task.id);
+      this.owner(worker, task);
+      check(
+        ['claimed', 'changes_requested', 'blocked', 'in_progress'].includes(task.status),
+        'cannot_dispatch',
+        'This task is not ready for implementation.',
+        'Read its current state and approvals.',
+      );
+      if (task.status !== 'in_progress')
+        this.changeStatus(worker, task, 'in_progress', `Dispatched by @${actor.handle}`);
+    } else {
+      this.reviewer(worker, task);
+      check(
+        !task.repository ||
+          !this.lock(task.repository).holder ||
+          this.lock(task.repository).task_id === task.id,
+        'write_lock_held',
+        'Another task is writing in this repository.',
+        'Wait until that writer has stopped.',
+      );
+      this.lockFor(worker, task);
+      this.store.run('UPDATE tasks SET reviewer=? WHERE id=?', worker.handle, task.id);
+    }
+    const sha = p.mode === 'review' ? this.submissionSha(task.id) : null;
+    const id = randomUUID();
+    this.store.run(
+      'INSERT INTO worker_runs(id,task_id,handle,coordinator,mode,commit_sha,lease_until,created_at) VALUES(?,?,?,?,?,?,?,?)',
+      id,
+      task.id,
+      worker.handle,
+      actor.handle,
+      p.mode,
+      sha,
+      this.lease(),
+      this.timestamp(),
+    );
+    this.store.run(
+      'INSERT INTO sessions(id,handle,last_seen_at) VALUES(?,?,?)',
+      id,
+      worker.handle,
+      this.timestamp(),
+    );
+    this.store.run(
+      "UPDATE participants SET status='online',last_seen_at=? WHERE handle=?",
+      this.timestamp(),
+      worker.handle,
+    );
+    this.event(actor.handle, 'worker.dispatched', task.id, {
+      run_id: id,
+      handle: worker.handle,
+      mode: p.mode,
+      commit_sha: sha,
+    });
+    return this.assignment(this.run(id));
+  }
+  private submissionSha(id: number): string | null {
+    // Select the submission event, not the latest artifact: resubmitting the same SHA does not insert another artifact.
+    const row = this.store.get<{ payload: string }>(
+      "SELECT payload FROM events WHERE task_id=? AND type='task.submitted' ORDER BY id DESC LIMIT 1",
+      id,
+    );
+    return row ? (JSON.parse(row.payload) as { commit_sha: string | null }).commit_sha : null;
+  }
+  private stopRun(
+    actor: Participant,
+    run: WorkerRun,
+    reason: string,
+    state: 'stopped' | 'expired' = 'stopped',
+    conflict = false,
+  ): WorkerAssignment {
+    this.store.run('UPDATE worker_runs SET state=? WHERE id=?', state, run.id);
+    this.store.run('DELETE FROM sessions WHERE id=?', run.id);
+    const task = this.task(run.task_id);
+    if (['in_progress', 'in_review'].includes(task.status)) {
+      const status = run.mode === 'review' ? 'in_review' : 'blocked';
+      this.store.run(
+        'UPDATE tasks SET status=?,frozen=CASE WHEN ? THEN 1 ELSE frozen END,lease_until=NULL,lease_expired_at=NULL,updated_at=? WHERE id=?',
+        status,
+        Number(conflict),
+        this.timestamp(),
+        task.id,
+      );
+      this.event(actor.handle, conflict ? 'task.merge_conflict' : 'worker.stopped', task.id, {
+        run_id: run.id,
+        from: task.status,
+        to: status,
+        reason,
+      });
+      this.systemMessage(
+        actor,
+        task.id,
+        reason,
+        conflict ? ['human', run.coordinator] : [run.coordinator],
+      );
+    }
+    return this.assignment(this.run(run.id));
+  }
+  private workerOperation(actor: Participant, operation: Operation, input: unknown): unknown {
+    const { run_id } = schemas.worker_get_task.parse({
+      run_id: (input as { run_id: string }).run_id,
+    });
+    const run = this.run(run_id);
+    check(
+      actor.handle === run.handle,
+      'worker_identity',
+      'This assignment belongs to another worker.',
+      'Use your own run_id.',
+      403,
+    );
+    if (operation === 'worker_get_task') return this.assignment(run);
+    if (operation === 'worker_heartbeat' && run.state !== 'active') return { state: run.state };
+    this.activeRun(actor, run_id);
+    if (operation === 'worker_heartbeat') {
+      this.store.run('UPDATE worker_runs SET lease_until=? WHERE id=?', this.lease(), run_id);
+      this.store.run('UPDATE sessions SET last_seen_at=? WHERE id=?', this.timestamp(), run_id);
+      this.store.run(
+        'UPDATE participants SET last_seen_at=? WHERE handle=?',
+        this.timestamp(),
+        actor.handle,
+      );
+      if (run.mode === 'implement')
+        this.store.run(
+          'UPDATE tasks SET lease_until=?,lease_expired_at=NULL WHERE id=?',
+          this.lease(),
+          run.task_id,
+        );
+      return { state: 'active' };
+    }
+    if (operation === 'worker_post_message') {
+      const p = schemas.worker_post_message.parse(input);
+      if (p.escalation) {
+        check(
+          this.task(run.task_id).type === 'merge' && run.mode === 'implement',
+          'not_merge_worker',
+          'Only a merge worker can report a merge conflict.',
+          'Report other findings as a normal message.',
+        );
+        return this.stopRun(actor, run, `合入冲突：${p.body}`, 'stopped', true);
+      }
+      return this.postMessage(actor, {
+        task_id: run.task_id,
+        body: p.body,
+        kind: p.kind,
+        mentions: [],
+      });
+    }
+    let task: Task;
+    if (operation === 'worker_submit') {
+      this.activeRun(actor, run_id, 'implement');
+      const p = schemas.worker_submit.parse(input);
+      task = this.submit(actor, {
+        id: run.task_id,
+        summary: p.summary,
+        artifacts: [
+          ...p.artifacts,
+          ...(p.commit_sha ? [{ kind: 'commit' as const, ref: p.commit_sha }] : []),
+        ],
+      });
+    } else {
+      this.activeRun(actor, run_id, 'review');
+      const p = schemas.worker_review.parse(input);
+      task = this.task(run.task_id);
+      check(
+        !task.writes_code || (p.commit_sha && p.commit_sha === run.commit_sha),
+        'review_version_mismatch',
+        'Review must identify the assigned submission SHA.',
+        'Use commit_sha from get_task; verify this version.',
+      );
+      const passed = new Set(p.criteria_passed);
+      check(
+        p.criteria_passed.every((id) => task.acceptance_criteria.some((c) => c.id === id)) &&
+          (p.verdict !== 'approve' || task.acceptance_criteria.every((c) => passed.has(c.id))),
+        'criteria_incomplete',
+        'Approval requires every acceptance criterion to be independently verified.',
+        'Supply the verified criterion IDs in criteria_passed or request changes.',
+      );
+      for (const c of task.acceptance_criteria)
+        this.store.run(
+          'UPDATE acceptance_criteria SET checked=?,checked_by=? WHERE id=?',
+          Number(passed.has(c.id)),
+          passed.has(c.id) ? actor.handle : null,
+          c.id,
+        );
+      if (p.verdict === 'approve' && isGated(this.settings(), 'in_review', 'done', task.type)) {
+        this.reviewer(actor, task);
+        this.systemMessage(
+          actor,
+          task.id,
+          `独立验收通过，等待自定义人工审批：${p.comments}`,
+          [run.coordinator],
+          'report',
+        );
+        this.requestApproval(actor, { id: task.id, to_status: 'done', reason: p.comments });
+        task = this.task(task.id);
+      } else task = this.review(actor, { id: task.id, verdict: p.verdict, comments: p.comments });
+    }
+    this.store.run("UPDATE worker_runs SET state='completed' WHERE id=?", run_id);
+    this.store.run('DELETE FROM sessions WHERE id=?', run_id);
+    this.event(actor.handle, 'worker.completed', task.id, { run_id });
+    return this.assignment(this.run(run_id));
+  }
   private claim(actor: Participant, id: number): Task {
     const task = this.task(id);
     this.writable(actor, task);
+    this.executionApproved(task);
     check(
       task.status === 'open' && !task.assignee,
       'already_claimed',
@@ -771,8 +1262,9 @@ export class Board {
     );
     const candidate = rows.find(
       (r) =>
-        actor.kind === 'human' ||
-        !isGated(this.settings(), 'open', 'claimed', this.task(r.id).type),
+        this.canExecute(this.task(r.id)) &&
+        (actor.kind === 'human' ||
+          !isGated(this.settings(), 'open', 'claimed', this.task(r.id).type)),
     );
     check(
       candidate,
@@ -784,6 +1276,13 @@ export class Board {
   }
   private updateTask(actor: Participant, p: Parsed<'update_task'>): Task {
     let task = this.task(p.id);
+    if (this.settings().approval_mode === 'plan' && this.planFor(task)?.plan_approved_at)
+      check(
+        !['description', 'acceptance_criteria', 'depends_on', 'repository'].some((k) => k in p),
+        'plan_scope_locked',
+        'The approved scope cannot be changed.',
+        'Create a follow-up plan for changes to scope, criteria, dependencies or repository.',
+      );
     if (p.criteria_check !== undefined) this.reviewer(actor, task);
     if (
       p.criteria_check === undefined ||
@@ -1090,6 +1589,9 @@ export class Board {
     this.addArtifacts(actor, task.id, p.artifacts);
     this.store.run('UPDATE tasks SET reviewer=? WHERE id=?', p.reviewer ?? null, task.id);
     this.changeStatus(actor, task, 'in_review', p.summary);
+    this.event(actor.handle, 'task.submitted', task.id, {
+      commit_sha: p.artifacts.find((a) => a.kind === 'commit')?.ref ?? null,
+    });
     const reviewers = p.reviewer ? [p.reviewer] : [task.creator];
     if (isGated(this.settings(), 'in_review', 'done', task.type)) reviewers.push('human');
     this.systemMessage(actor, task.id, `提交验收：${p.summary}`, reviewers, 'handoff');
@@ -1169,6 +1671,7 @@ export class Board {
   }
   private requestApproval(actor: Participant, p: Parsed<'request_approval'>): Approval {
     const task = this.task(p.id);
+    if (task.type === 'merge' && p.to_status === 'open') this.dependenciesDone(task);
     const eligibleReviewer =
       task.status === 'in_review' &&
       actor.handle !== task.assignee &&
@@ -1216,6 +1719,47 @@ export class Board {
   private transitionTask(actor: Participant, p: Parsed<'transition_task'>): Task {
     this.human(actor);
     const task = this.task(p.id);
+    if (task.type === 'merge' && task.status === 'draft' && p.status === 'open')
+      this.dependenciesDone(task);
+    if (task.type === 'plan' && p.status === 'cancelled')
+      check(
+        !this.store.get(
+          "SELECT 1 FROM tasks WHERE parent_id=? AND status NOT IN ('done','cancelled')",
+          task.id,
+        ),
+        'plan_has_active_tasks',
+        'This plan still has active children.',
+        'Cancel or finish its child tasks first.',
+      );
+    if (
+      this.settings().approval_mode === 'plan' &&
+      task.workflow_plan &&
+      task.status === 'draft' &&
+      p.status === 'open'
+    ) {
+      const scope = this.store
+        .all<{ writes_code: number; repository: string | null; status: string }>(
+          `WITH RECURSIVE scope(id,writes_code,repository,status) AS (
+        SELECT id,writes_code,repository,status FROM tasks WHERE parent_id=? UNION ALL
+        SELECT t.id,t.writes_code,t.repository,t.status FROM tasks t JOIN scope s ON t.parent_id=s.id
+      ) SELECT * FROM scope`,
+          task.id,
+        )
+        .filter((t) => t.status !== 'cancelled');
+      check(
+        scope.length > 0 && scope.every((t) => !t.writes_code || t.repository),
+        'plan_scope_incomplete',
+        'The plan needs child tasks with repositories selected for all code work.',
+        'Finish defining the scope before approving the plan.',
+      );
+      this.store.run(
+        'UPDATE tasks SET plan_approved_at=?,plan_approved_by=? WHERE id=?',
+        this.timestamp(),
+        actor.handle,
+        task.id,
+      );
+      this.event(actor.handle, 'plan.approved', task.id, { reason: p.reason });
+    }
     switch (p.status) {
       case 'done':
         return this.review(actor, { id: p.id, verdict: 'approve', comments: p.reason });
@@ -1569,7 +2113,7 @@ export class Board {
       unread: this.unread(actor.handle),
       attention: this.store
         .all<TaskRow>(
-          "SELECT * FROM tasks WHERE status='blocked' OR lease_expired_at IS NOT NULL OR frozen=1 ORDER BY priority,id",
+          "SELECT * FROM tasks WHERE status NOT IN ('done','cancelled') AND (status='blocked' OR lease_expired_at IS NOT NULL OR frozen=1) ORDER BY priority,id",
         )
         .map((t) => this.summary(t)),
       event_cursor: this.eventCursor(),
@@ -1579,6 +2123,16 @@ export class Board {
     const now = this.timestamp();
     const cutoff = new Date(this.now() - 90000).toISOString();
     this.transaction(() => {
+      for (const run of this.store.all<WorkerRun>(
+        "SELECT * FROM worker_runs WHERE state='active' AND lease_until<=?",
+        now,
+      ))
+        this.stopRun(
+          this.participant(run.handle, true),
+          run,
+          'Worker 连接已过期，工作目录和锁已保留；请协调者确认旧进程停止后重新派发。',
+          'expired',
+        );
       for (const row of this.store.all<ParticipantRow>(
         `SELECT ${participantColumns} FROM participants WHERE kind='agent' AND status!='offline' AND NOT EXISTS(SELECT 1 FROM sessions WHERE sessions.handle=participants.handle AND sessions.last_seen_at>?)`,
         cutoff,
@@ -1680,6 +2234,28 @@ export class Board {
       if (write) this.writable(actor);
       if (operations[operation].human) this.human(actor);
       switch (operation) {
+        case 'dispatch_task':
+          return this.dispatch(actor, schemas.dispatch_task.parse(parsed));
+        case 'complete_plan':
+          return this.completePlan(actor, schemas.complete_plan.parse(parsed));
+        case 'stop_worker': {
+          const p = schemas.stop_worker.parse(parsed);
+          const run = this.run(p.run_id);
+          check(
+            actor.kind === 'human' || actor.handle === run.coordinator,
+            'coordinator_required',
+            'Only the coordinator can stop this worker.',
+            'Ask the coordinator to stop it.',
+            403,
+          );
+          return run.state === 'active' ? this.stopRun(actor, run, p.reason) : this.assignment(run);
+        }
+        case 'worker_get_task':
+        case 'worker_heartbeat':
+        case 'worker_post_message':
+        case 'worker_submit':
+        case 'worker_review':
+          return this.workerOperation(actor, operation, parsed);
         case 'join':
         case 'leave':
           throw new Error('Session operations require the HTTP session entry point.');
@@ -1939,6 +2515,48 @@ export class Board {
         urgent: urgent ? { ...urgent, body: urgent.body.slice(0, 240) } : null,
       };
     };
+    if (
+      operation === 'worker_submit' ||
+      operation === 'worker_review' ||
+      (operation === 'dispatch_task' && schemas.dispatch_task.parse(parsed).mode === 'review')
+    ) {
+      const workerRun =
+        'run_id' in parsed
+          ? this.activeRun(
+              actor,
+              parsed.run_id,
+              operation === 'worker_submit' ? 'implement' : 'review',
+            )
+          : undefined;
+      const task = this.task(workerRun?.task_id ?? schemas.dispatch_task.parse(parsed).id);
+      const sha =
+        operation === 'worker_submit'
+          ? schemas.worker_submit.parse(parsed).commit_sha
+          : (workerRun?.commit_sha ?? this.submissionSha(task.id));
+      const requiresGit =
+        operation !== 'worker_review' || schemas.worker_review.parse(parsed).verdict === 'approve';
+      if (task.writes_code && requiresGit) {
+        check(
+          task.repository && sha,
+          'commit_required',
+          'This phase requires a recorded full submission SHA and repository.',
+          'Submit a commit before dispatching its review.',
+        );
+        const revision = () =>
+          this.store.get<{ id: number }>(
+            'SELECT coalesce(max(id),0) id FROM events WHERE task_id=?',
+            task.id,
+          )!.id;
+        const before = revision();
+        await (this.options.verifyCommit ?? verifyCommit)(task.repository, sha);
+        check(
+          revision() === before,
+          'task_changed',
+          'The task changed during Git verification.',
+          'Read the task again before retrying.',
+        );
+      }
+    }
     if (
       operation === 'submit_for_review' ||
       (operation === 'transition_task' &&

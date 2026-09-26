@@ -54,7 +54,7 @@ export class Store {
       );
       const version = this.get<{ user_version: number }>('PRAGMA user_version')!.user_version;
       if (version === 0) this.transaction(() => this.connection.exec(migration));
-      else if (![1, 2, 3, 4].includes(version))
+      else if (![1, 2, 3, 4, 5].includes(version))
         throw new Error(
           `Unsupported database version ${version}. Upgrade the server before opening this file.`,
         );
@@ -91,6 +91,25 @@ export class Store {
         DROP TABLE write_lock;
         PRAGMA user_version=4;
       `),
+        );
+      if (version < 5)
+        this.transaction(() =>
+          this.connection.exec(`
+          ALTER TABLE tasks ADD COLUMN plan_approved_at TEXT;
+          ALTER TABLE tasks ADD COLUMN plan_approved_by TEXT REFERENCES participants(handle);
+          ALTER TABLE tasks ADD COLUMN workflow_plan INTEGER NOT NULL DEFAULT 0;
+          CREATE TABLE worker_runs (
+            id TEXT PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
+            handle TEXT NOT NULL REFERENCES participants(handle),
+            coordinator TEXT NOT NULL REFERENCES participants(handle),
+            mode TEXT NOT NULL CHECK(mode IN ('implement','review')),
+            state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','completed','stopped','expired')),
+            commit_sha TEXT, lease_until TEXT NOT NULL, created_at TEXT NOT NULL
+          );
+            CREATE UNIQUE INDEX worker_active_task ON worker_runs(task_id) WHERE state='active';
+            CREATE INDEX worker_task ON worker_runs(task_id,created_at);
+          PRAGMA user_version=5;
+        `),
         );
     } catch (error) {
       this.connection.close();

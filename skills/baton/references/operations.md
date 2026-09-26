@@ -1,6 +1,10 @@
-# Baton 操作参考
+# Baton 高级操作参考
 
-按需查阅。MCP 与 CLI 共用业务参数；MCP 另需 `session_id`，CLI 使用全局 `--session` 并加 `--json`。字段以当前工具 schema / `--help` 为准。下列 ID、handle、SHA 和路径都是示例值，调用前替换为实际读取的值。
+本文件用于手动协议、旧任务和自定义审批策略。默认四工具 worker 只读 [技能入口](../SKILL.md)，不需要此处的 join、收件箱或续租步骤。默认 MCP 是 `workflow` 工具集；以下完整手动工具需在全局 MCP 启动参数中设置 `--profile full`，CLI 始终保留。MCP 另需 `session_id`，CLI 使用 `--session` 并加 `--json`；替换示例中的实际 ID、SHA 和路径。
+
+默认 `approval_mode=plan`：先创建草稿 plan 和代码子任务，再申请计划发布；实现任务须关联计划，批准前不能开工，批准后范围锁定。下文逐任务 gate 示例仅用于 `approval_mode=custom`。`settings.gates` 在 plan 模式不参与判断，`merge_approval` 控制合入任务是否需要额外的发布审批。不要代人修改策略。
+
+CLI 也有 `task dispatch <id> --handle coder --mode implement`、`task complete-plan <id>`、`worker get/message/submit/review --run-id <id>` 和 `worker stop --run-id <id>`。只有 MCP 会为派发的 worker 自动续租；单次 CLI 命令不创建后台续租器。
 
 ## 入口与返回值
 
@@ -21,6 +25,8 @@ agent-board --session <id> task list --mine --active-only --json
 ```
 
 后文省略的 `--session` 都需要补上，除非环境已有 `BOARD_SESSION_ID`。只有在 Baton 源码根目录才将 `agent-board` 替换成 `pnpm board`；其他目录使用已确认的客户端绝对路径。`run --as` 是可选包装器，现有 App 会话无需再启动自己的 CLI。单次 `--as` 命令会临时加入和退出，不适合代替当前持久会话。
+
+子 Agent 若继承父角色的 `BOARD_AGENT` / `BOARD_SESSION_ID`，先为自己 `join`；CLI 后续显式传自己的 `--session`，并只在自己的命令进程环境中清除或改正继承的 `BOARD_AGENT`，否则客户端会报身份不匹配。不要修改共享 MCP 或全局环境；MCP 的 `join` 不传 `session_id`，后续调用直接携带子 Agent 自己的 ID。
 
 明确结束协作时用 `leave`；退出只使该 ID 失效，不释放任务或写入锁。会话 ID 不会因为 90 秒没有请求而过期，也不代表人工权限。
 
@@ -68,7 +74,9 @@ agent-board call update_task --data-file /outside/repository/update.json --json
 }
 ```
 
-顶层 `repository` 才是任务执行仓库，使用服务所在机器的 Git 工作树绝对路径；`context.repository` 不参与执行。跨仓库总计划可省略，代码任务开工前必须通过 `update_task` 补齐。领取结果返回规范化路径，开工后不能切换仓库。创建时 `parent_id` 表示分组，`depends_on` 表示必须先完成的依赖，两者不可替代；列任务时父任务过滤参数叫 `parent`。`implement` / `bug` 总是需要写入锁，其他类型需要改仓库时显式设 `writes_code=true`。发布是否审批以当前 gates 为准。
+顶层 `repository` 才是任务执行仓库，使用服务所在机器的 Git 工作树绝对路径；`context.repository` 不参与执行。跨仓库总计划可省略，代码任务开工前必须通过 `update_task` 补齐。领取结果返回规范化路径，开工后不能切换仓库。创建时 `parent_id` 表示分组，`depends_on` 表示必须先完成的依赖，两者不可替代；列任务时父任务过滤参数叫 `parent`。`implement` / `bug` / `merge` 总是需要写入锁，其他类型需要改仓库时显式设 `writes_code=true`。发布是否审批以当前 gates 为准。
+
+这里的 Git 工作树包含普通仓库的现有工作目录，不要求通过 `git worktree add` 新建目录。默认 coder 与 tester 使用相同的 `repository`，顺序完成实现和验收。
 
 ## 执行：claim_task
 
@@ -76,7 +84,7 @@ agent-board call update_task --data-file /outside/repository/update.json --json
 { "id": 42 }
 ```
 
-正常流转是 `open → claimed → in_progress → in_review`。被退回为 `changes_requested` 后读取意见并重新开工；`blocked` 只有解决阻塞后才恢复。不要把已领取当作已开工，不要用通用状态更新跳过提交或验收操作。
+正常流转是 `open → claimed → in_progress → in_review`。被退回为 `changes_requested` 后，同一负责人读取意见并通过 `update_task(status="in_progress")` 重新开工，不重复认领；`blocked` 只有解决阻塞且未触及返工上限等限制后才恢复。独立 tester 直接验收原 `in_review` 任务，不认领它。不要把已领取当作已开工，不要用通用状态更新跳过提交或验收操作。
 
 ## 开工或恢复：update_task
 
@@ -112,7 +120,24 @@ agent-board call update_task --data-file /outside/repository/update.json --json
 }
 ```
 
-摘要中的“通过”必须替换为实际结果。代码任务必须提交一个完整的 40 或 64 位 SHA，不能提交分支名、短 SHA 或示例占位符。使用目标仓库的 `git rev-parse HEAD` 和 `git status --porcelain --untracked-files=all` 核实；成功提交后才释放锁。只读任务可交付报告，不强制创建代码 commit。
+摘要中的“通过”必须替换为实际结果。代码任务必须提交一个完整的 40 或 64 位 SHA，不能提交分支名、短 SHA 或示例占位符。使用目标仓库的 `git rev-parse HEAD` 和 `git status --porcelain --untracked-files=all` 核实；纯手动流程成功提交后释放锁，管理的 worker 保留至验收结束。只读任务可交付报告，不强制创建代码 commit。`reviewer` 是可选字段；只填写已注册且独立的真实 handle。新 tester 尚未加入时可省略，由主 Agent 随后调度有验收权限的 tester，不用借身份提前注册。
+
+## 共享目录验收
+
+默认不创建副本，在任务的现有仓库目录验收。独立性来自不同的 coder 与 tester 身份及实际检查，不来自目录隔离。
+
+1. 主 Agent 确认 coder 已停止修改，同目录暂不派发下一项写入工作。纯手动任务的 `submit_for_review` 释放锁；通过 `dispatch_task` 管理的任务会保留验收期锁。tester 读取 `get_lock(repository=任务路径)`，发现其他任务持锁或外部写者时先协调。
+2. tester 读取任务及最新交接，确认仍为本次 `in_review`。在任务的 `repository` 中运行以下只读命令；HEAD 必须等于本次提交的完整 SHA，status 必须为空：
+
+   ```sh
+   git rev-parse HEAD
+   git status --porcelain --untracked-files=all
+   ```
+
+3. 运行既定测试并核对语义标准，不修改源文件、测试文件、依赖声明或 lockfile。报告和临时数据输出到仓库外；已有忽略目录中的常规构建缓存可以使用。命令如果会改动受版本管理的文件或产生未忽略文件，先让 coder 在持锁任务中调整测试配置并重新提交，不能由 tester 顺手改代码。
+4. 测试结束后、勾选标准和提交结论前，再核对任务状态、本次交接 SHA、HEAD、status 和写入占用。任何不一致都停止本轮验收，报告实际观察并交主 Agent 协调；不能将结果算作原提交通过，也不自动 checkout、reset、stash 或清理现场。
+
+测试失败但版本与目录未变化时，按正常流程退回 coder。需要隔离时由用户明确选择，再使用单独 worktree 或临时 clone；它们不是本流程的必需步骤。
 
 ## 验收标准：update_task
 
@@ -137,6 +162,8 @@ agent-board call update_task --data-file /outside/repository/update.json --json
 ```
 
 全部标准已核验且勾选时才用 `verdict="approve"`。`submit_for_review` / `review_task` 自带任务消息，不额外发送相同报告。退回会增加 attempt，达到策略上限后转 blocked 并通知人。
+
+最终通过的操作先按 `get_settings.gates` 分支：无 gate 时调用 `review_task(approve)`；命中 `in_review → done` 的人工 gate 时，先在任务中用 `post_message(kind="report")` 写明独立验收通过的证据，再 `request_approval(to_status="done")`。此时不调用会被拒绝的 `review_task(approve)`，也不宣称已经写入批准 verdict；任务仍为 `in_review`，直到人批准且服务端确认 `done`。
 
 ## 人工审批：request_approval
 

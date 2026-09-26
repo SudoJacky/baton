@@ -820,6 +820,37 @@ function SettingsForm({ initial }: { initial: Settings }) {
         }
       }}
     >
+      <label>
+        审批方式
+        <select
+          value={value.approval_mode}
+          onChange={(e) =>
+            setValue({ ...value, approval_mode: e.target.value as Settings['approval_mode'] })
+          }
+        >
+          <option value="plan">仅审批计划</option>
+          <option value="custom">自定义审批规则</option>
+        </select>
+      </label>
+      {value.approval_mode === 'plan' && (
+        <>
+          <p className="muted small">
+            计划批准后，实现、独立验收和返工自动推进。达到返工上限或报告合入冲突时转交人工。由主
+            Agent 调度子 Agent，服务本身不启动模型。
+          </p>
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={value.merge_approval}
+              onChange={(e) => setValue({ ...value, merge_approval: e.target.checked })}
+            />
+            分支合入前需要人工审批
+          </label>
+          <p className="muted small">
+            仅作用于「合入」任务；使用现有分支顺序工作时，无需增加合入任务。
+          </p>
+        </>
+      )}
       <div className="form-row">
         <label>
           认领租约（分钟）
@@ -870,19 +901,18 @@ function SettingsForm({ initial }: { initial: Settings }) {
           />
         </label>
       </div>
-      <label>
-        人工审批规则
-        <textarea
-          className="code-input"
-          rows={12}
-          value={gates}
-          onChange={(e) => setGates(e.target.value)}
-          spellCheck={false}
-        />
-      </label>
-      <p className="muted small">
-        规则使用 from、to 和 types 指定转换。例如 draft → open 的 implement 任务必须先经人工发布。
-      </p>
+      {value.approval_mode === 'custom' && (
+        <label>
+          人工审批规则
+          <textarea
+            className="code-input"
+            rows={12}
+            value={gates}
+            onChange={(e) => setGates(e.target.value)}
+            spellCheck={false}
+          />
+        </label>
+      )}
       <label>
         各角色可创建的任务类型
         <textarea

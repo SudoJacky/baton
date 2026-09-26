@@ -14,6 +14,7 @@ import {
   type AgentSession,
   type Message,
   type Task,
+  type WorkerAssignment,
 } from '@baton/shared';
 import { ensureLocalAccess, readLocalAccess } from '@baton/shared/local';
 import { Board, hashToken } from '../../server/src/board.js';
@@ -203,10 +204,13 @@ it('the optional wrapper passes a non-secret session ID and preserves the child 
   expect(data).toMatchObject({ handle: 'tester', status: 'online', has_token: false });
   expect(() => f.board.authenticate(f.agentToken, data.session_id)).toThrow();
 });
-async function connectMcp(f: Awaited<ReturnType<typeof fixture>>) {
+async function connectMcp(
+  f: Awaited<ReturnType<typeof fixture>>,
+  profile: 'full' | 'workflow' = 'full',
+) {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [resolve('packages/client/dist/mcp.js'), '--config', f.configFile],
+    args: [resolve('packages/client/dist/mcp.js'), '--config', f.configFile, '--profile', profile],
     env: {
       ...Object.fromEntries(
         Object.entries(process.env).filter(
@@ -228,6 +232,134 @@ function toolData(result: Awaited<ReturnType<Client['callTool']>>) {
   expect(result.isError, JSON.stringify(result)).not.toBe(true);
   return JSON.parse((result.content as { type: string; text: string }[])[0]!.text).data;
 }
+it('runs the four worker tools over one shared MCP with automatic leases and real Git review', async () => {
+  const f = await fixture();
+  await writeFile(join(f.directory, '.gitignore'), ' *\n!.gitignore\n!code.ts\n'.trimStart());
+  await writeFile(join(f.directory, 'code.ts'), 'export const answer = 42;\n');
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-C', f.directory, ...args], {
+      encoding: 'utf8',
+      windowsHide: true,
+    }).trim();
+  git('add', '--', '.gitignore', 'code.ts');
+  git(
+    '-c',
+    'user.name=Baton Test',
+    '-c',
+    'user.email=baton@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'Test implementation',
+  );
+  const sha = git('rev-parse', 'HEAD');
+  const mcp = await connectMcp(f, 'workflow');
+  const names = (await mcp.listTools()).tools.map((t) => t.name);
+  expect(names).toEqual(
+    expect.arrayContaining(['get_task', 'post_message', 'submit', 'review', 'dispatch_task']),
+  );
+  for (const name of [
+    'claim_task',
+    'update_task',
+    'review_task',
+    'submit_for_review',
+    'mark_read',
+    'worker_heartbeat',
+  ])
+    expect(names).not.toContain(name);
+  const call = async (name: string, args: Record<string, unknown>) =>
+    toolData(await mcp.callTool({ name, arguments: args }));
+  const planner = (await call('join', { handle: 'planner' })) as AgentSession;
+  const parent = (await call('create_task', {
+    session_id: planner.session_id,
+    title: 'MCP plan',
+    type: 'plan',
+  })) as Task;
+  const task = (await call('create_task', {
+    session_id: planner.session_id,
+    title: 'MCP implementation',
+    type: 'implement',
+    parent_id: parent.id,
+    repository: f.directory,
+    acceptance_criteria: ['Exports 42'],
+  })) as Task;
+  await call('request_approval', {
+    session_id: planner.session_id,
+    id: parent.id,
+    to_status: 'open',
+    reason: 'Discussed plan',
+  });
+  await f
+    .client('dax')
+    .call('transition_task', { id: parent.id, status: 'open', reason: 'Approved' });
+  await f.client('dax').call('put_settings', { lease_minutes: 0.03 });
+  const worker = (await call('dispatch_task', {
+    session_id: planner.session_id,
+    id: task.id,
+    mode: 'implement',
+    handle: 'coder',
+  })) as WorkerAssignment;
+  const events = f.board.eventCursor();
+  const until = Date.now() + 3700;
+  while (Date.now() < until) {
+    await call('get_task', { run_id: worker.run_id });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  const live = (await call('get_task', { run_id: worker.run_id })) as WorkerAssignment;
+  expect(live.task).toMatchObject({ status: 'in_progress', lease_expired_at: null });
+  expect(f.board.eventCursor()).toBe(events);
+  await call('post_message', { run_id: worker.run_id, body: 'Implementation and checks complete' });
+  expect(
+    (
+      (await call('submit', {
+        run_id: worker.run_id,
+        summary: 'Exports 42',
+        commit_sha: sha,
+      })) as WorkerAssignment
+    ).task.status,
+  ).toBe('in_review');
+  const reviewer = (await call('dispatch_task', {
+    session_id: planner.session_id,
+    id: task.id,
+    mode: 'review',
+    handle: 'tester',
+  })) as WorkerAssignment;
+  const source = await readFile(join(f.directory, 'code.ts'), 'utf8');
+  expect(source).toContain('answer = 42');
+  // The four-tool facade must still enforce the fixed reviewed revision and clean working tree.
+  await writeFile(join(f.directory, 'code.ts'), 'export const answer = 0;\n');
+  const dirty = await mcp.callTool({
+    name: 'review',
+    arguments: {
+      run_id: reviewer.run_id,
+      verdict: 'approve',
+      comments: 'No stale approval',
+      commit_sha: sha,
+      criteria_passed: reviewer.task.acceptance_criteria.map((c) => c.id),
+    },
+  });
+  expect(dirty.isError).toBe(true);
+  expect(JSON.stringify(dirty.content)).toContain('dirty_worktree');
+  await writeFile(join(f.directory, 'code.ts'), source);
+  const reviewed = (await call('review', {
+    run_id: reviewer.run_id,
+    verdict: 'approve',
+    comments: 'Read code.ts; export is 42; HEAD and clean status verified',
+    commit_sha: sha,
+    criteria_passed: reviewer.task.acceptance_criteria.map((c) => c.id),
+  })) as WorkerAssignment;
+  expect(reviewed.task.status).toBe('done');
+  expect((await f.client('dax').call<unknown[]>('list_approvals', {})).data).toHaveLength(0);
+  expect(
+    (
+      (await call('complete_plan', {
+        session_id: planner.session_id,
+        id: parent.id,
+        summary: 'Implementation independently checked',
+      })) as Task
+    ).status,
+  ).toBe('done');
+}, 20000);
 it('keeps three conversations independent through one shared MCP without any per-agent credentials', async () => {
   const f = await fixture();
   const mcp = await connectMcp(f);
