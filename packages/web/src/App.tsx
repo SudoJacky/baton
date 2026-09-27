@@ -1,3 +1,5 @@
+import { useI18n, locale } from './i18n.js';
+import { setPreferences, usePreferences, type Preferences, type Language } from './preferences.js';
 import { useMemo, useState, useEffect, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { BoardClient } from '@baton/client';
@@ -5,20 +7,21 @@ import {
   Activity,
   ArrowUpRight,
   BookOpen,
-  CircleHelp,
   Columns3,
   Inbox as InboxIcon,
   LayoutDashboard,
   LockKeyhole,
   MessageSquare,
+  Pencil,
   Plus,
   Settings2,
   Users,
   UnlockKeyhole,
-  Radio,
   ChevronRight,
   Snowflake,
   ShieldCheck,
+  Sun,
+  Moon,
 } from 'lucide-react';
 import type {
   Identity,
@@ -26,6 +29,7 @@ import type {
   Participant,
   Settings,
   Message,
+  TaskStatus,
   TaskSummary,
   WriteLock,
 } from '@baton/shared';
@@ -38,32 +42,81 @@ import {
   Empty,
   ErrorNotice,
   EventList,
+  PageBoundary,
   ago,
   errorText,
+  greeting,
+  lunarDate,
   statusNames,
   useAction,
   useBoard,
   useData,
   useEvents,
 } from './board.js';
+import { useGlassLight, useGlassParams, useLiquidGlass } from './glass.js';
+import { GlassTuner } from './tuner.js';
 import { Inbox, Messages, MessageCard } from './messages.js';
 import { NewTask, TaskBoard, TaskDetails } from './tasks.js';
 
 type Page = 'overview' | 'board' | 'inbox' | 'messages' | 'agents' | 'decisions' | 'settings';
-const navigation: { id: Page; label: string; icon: typeof Activity; subtitle: string }[] = [
-  { id: 'overview', label: '总览', icon: LayoutDashboard, subtitle: '每一次交接，都有迹可循。' },
-  { id: 'board', label: '任务看板', icon: Columns3, subtitle: '从想法到完成，让工作有序流动。' },
-  { id: 'inbox', label: '收件箱', icon: InboxIcon, subtitle: '需要你的判断，或等你的一句回复。' },
+const navigation: {
+  id: Page;
+  label: string;
+  icon: typeof Activity;
+  group: string;
+}[] = [
+  {
+    id: 'overview',
+    label: '总览',
+    icon: LayoutDashboard,
+    group: '日常',
+  },
+  {
+    id: 'board',
+    label: '任务看板',
+    icon: Columns3,
+    group: '日常',
+  },
+  {
+    id: 'inbox',
+    label: '收件箱',
+    icon: InboxIcon,
+    group: '日常',
+  },
   {
     id: 'messages',
     label: '消息',
     icon: MessageSquare,
-    subtitle: '共享上下文，讨论问题，记录决定。',
+    group: '日常',
   },
-  { id: 'agents', label: '参与者', icon: Users, subtitle: '独立的会话，在同一个方向上协作。' },
-  { id: 'decisions', label: '决策日志', icon: BookOpen, subtitle: '保留为什么做出这个选择。' },
-  { id: 'settings', label: '项目设置', icon: Settings2, subtitle: '定义协作规则与人工审批边界。' },
+  {
+    id: 'agents',
+    label: '参与者',
+    icon: Users,
+    group: '记录与规则',
+  },
+  {
+    id: 'decisions',
+    label: '决策日志',
+    icon: BookOpen,
+    group: '记录与规则',
+  },
+  {
+    id: 'settings',
+    label: '项目设置',
+    icon: Settings2,
+    group: '记录与规则',
+  },
 ];
+const navigationGroups = [...new Set(navigation.map((item) => item.group))];
+const pageFromHash = (): Page => {
+  const id = location.hash.slice(1);
+  return navigation.some((item) => item.id === id) ? (id as Page) : 'overview';
+};
+const todayLabel = (date: Date) =>
+  new Intl.DateTimeFormat(locale(), { month: 'long', day: 'numeric', weekday: 'short' }).format(
+    date,
+  );
 function Brand() {
   return (
     <div className="brand">
@@ -78,6 +131,8 @@ function Brand() {
   );
 }
 export function App() {
+  const tr = useI18n();
+  const { language } = usePreferences();
   const api = useMemo(() => new BoardClient(location.origin), []);
   useEffect(() => {
     sessionStorage.removeItem('baton-token');
@@ -92,17 +147,36 @@ export function App() {
     refetchInterval: 30000,
   });
   const connection = useEvents(api, overview.data?.event_cursor);
-  const [page, setPage] = useState<Page>('overview');
+  const [page, setCurrentPage] = useState<Page>(pageFromHash);
+  useEffect(() => {
+    const sync = () => setCurrentPage(pageFromHash());
+    window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
+  useEffect(() => {
+    // scrollTo may return a Promise; effects must only return a cleanup function or nothing.
+    window.scrollTo(0, 0);
+  }, [page]);
+  const setPage = (next: Page) => {
+    if (next !== page) location.hash = next;
+  };
   const [taskId, setTaskId] = useState<number>();
   const [creating, setCreating] = useState(false);
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [topbar, setTopbar] = useState<HTMLDivElement | null>(null);
+  const [sidebar, setSidebar] = useState<HTMLElement | null>(null);
+  const glass = useGlassParams();
+  useLiquidGlass(topbar, glass);
+  useLiquidGlass(sidebar, glass);
+  useGlassLight();
   if (identity.error || identity.data?.participant.kind === 'agent')
     return (
       <div className="centered">
         <ErrorNotice
-          error={identity.error ?? new Error('工作空间未返回本地用户，请检查服务配置。')}
+          error={identity.error ?? new Error(tr('工作空间未返回本地用户，请检查服务配置。'))}
         />
         <button className="button" onClick={() => void identity.refetch()}>
-          重新连接
+          {tr('重新连接')}
         </button>
       </div>
     );
@@ -110,11 +184,14 @@ export function App() {
     return (
       <div className="centered">
         <Brand />
-        <p className="muted">正在连接工作空间…</p>
+        <p className="muted">{tr('正在连接工作空间…')}</p>
       </div>
     );
   const current = navigation.find((item) => item.id === page)!;
   const me = identity.data.participant;
+  const displayName = me.display_name?.trim();
+  const now = new Date();
+  const lunar = lunarDate(now);
   return (
     <BoardContext.Provider
       value={{
@@ -126,80 +203,81 @@ export function App() {
       }}
     >
       <div className="app-shell">
-        <aside className="sidebar">
+        <aside className="sidebar glass" ref={setSidebar}>
           <Brand />
-          <div className="workspace-label">
-            <span className="workspace-icon">B</span>
-            <div>
-              <strong>Agent Board</strong>
-              <span>本地工作空间</span>
-            </div>
-            <ChevronRight size={14} />
-          </div>
-          <div className="nav-label">工作空间</div>
-          <nav aria-label="主导航">
-            {navigation.map((item) => (
-              <button
-                key={item.id}
-                aria-label={item.label}
-                className={page === item.id ? 'active' : ''}
-                aria-current={page === item.id ? 'page' : undefined}
-                onClick={() => setPage(item.id)}
-              >
-                <item.icon size={18} />
-                <span>{item.label}</span>
-                {item.id === 'inbox' && Boolean(overview.data?.unread) && (
-                  <b className="nav-count">{overview.data!.unread}</b>
-                )}
-              </button>
+          <nav aria-label={tr('主导航')}>
+            {navigationGroups.map((group) => (
+              <div className="nav-group" key={group}>
+                <div className="nav-label">{tr(group)}</div>
+                {navigation
+                  .filter((item) => item.group === group)
+                  .map((item) => (
+                    <button
+                      key={item.id}
+                      aria-label={tr(item.label)}
+                      title={tr(item.label)}
+                      className={page === item.id ? 'active' : ''}
+                      aria-current={page === item.id ? 'page' : undefined}
+                      onClick={() => setPage(item.id)}
+                    >
+                      <item.icon size={17} />
+                      <span>{tr(item.label)}</span>
+                      {item.id === 'inbox' && Boolean(overview.data?.unread) && (
+                        <b className="nav-count">{overview.data!.unread}</b>
+                      )}
+                    </button>
+                  ))}
+              </div>
             ))}
           </nav>
           <div className="sidebar-bottom">
-            <div className="local-note">
-              <Radio size={16} />
-              <div>
-                <strong>本机协作</strong>
-                <span>状态集中，工具自由。</span>
-              </div>
-            </div>
-            <div className="profile">
+            <button
+              className="profile"
+              aria-label={tr('修改昵称')}
+              title={tr('修改昵称')}
+              onClick={() => setEditingProfile(true)}
+            >
               <Avatar handle={me.handle} />
-              <div>
-                <strong>{me.display_name ?? me.handle}</strong>
-                <span>Human · @{me.handle}</span>
-              </div>
-            </div>
+              <span className="profile-details">
+                <strong title={displayName}>{displayName || tr('设置昵称')}</strong>
+                <span>@{me.handle}</span>
+              </span>
+              <Pencil className="profile-edit" size={14} aria-hidden="true" />
+            </button>
           </div>
         </aside>
         <main className="main-area">
-          <div className="topbar">
-            <span>
-              工作空间 <ChevronRight size={12} />
-              {current.label}
+          <div className="topbar glass" ref={setTopbar}>
+            <span className="crumbs">
+              <span>{tr(current.group)}</span> <ChevronRight size={12} />
+              <strong>{tr(current.label)}</strong>
             </span>
-            <div className={`connection ${connection}`}>
-              <span className="dot" />
-              {connection === 'live'
-                ? '实时连接'
-                : connection === 'retrying'
-                  ? '连接中断，正在重连'
+            <span className="topbar-date">
+              {todayLabel(now)}
+              {language === 'zh-CN' && lunar && <span className="lunar"> · 农历{lunar}</span>}
+            </span>
+            {connection !== 'live' && (
+              <div className={`connection ${connection}`} role="status">
+                <span className="dot" />
+                {connection === 'retrying'
+                  ? tr('连接中断，正在重连')
                   : connection === 'unauthorized'
-                    ? '连接被拒绝，请检查服务配置'
-                    : '正在连接'}
-            </div>
+                    ? tr('连接被拒绝，请检查服务配置')
+                    : tr('正在连接')}
+              </div>
+            )}
+            <AppearanceControls />
           </div>
           <div className="page">
             <header className="page-header">
-              <div>
-                <span className="eyebrow">
-                  {page === 'overview' ? 'WORKSPACE OVERVIEW' : 'AGENT BOARD'}
-                </span>
-                <h1>{current.label}</h1>
-                <p>{current.subtitle}</p>
-              </div>
+              <h1>
+                {page === 'overview'
+                  ? `${greeting(now)}${displayName ? `${language === 'en' ? ', ' : '，'}${displayName}` : ''}`
+                  : tr(current.label)}
+              </h1>
               <button className="button primary" onClick={() => setCreating(true)}>
                 <Plus size={17} />
-                创建任务
+                {tr('创建任务')}
               </button>
             </header>
             <ErrorNotice error={overview.error} />
@@ -207,24 +285,129 @@ export function App() {
               <LockBanner key={lock.repository ?? 'legacy'} lock={lock} />
             ))}
             <LockBanner />
-            {page === 'overview' && <Overview data={overview.data} go={setPage} />}
-            {page === 'board' && <TaskBoard />}
-            {page === 'inbox' && <Inbox />}
-            {page === 'messages' && <Messages />}
-            {page === 'agents' && <Participants />}
-            {page === 'decisions' && <Decisions />}
-            {page === 'settings' && <ProjectSettings />}
+            <PageBoundary key={page}>
+              {page === 'overview' && <Overview data={overview.data} go={setPage} />}
+              {page === 'board' && <TaskBoard />}
+              {page === 'inbox' && <Inbox />}
+              {page === 'messages' && <Messages />}
+              {page === 'agents' && <Participants />}
+              {page === 'decisions' && <Decisions />}
+              {page === 'settings' && <ProjectSettings />}
+            </PageBoundary>
           </div>
         </main>
       </div>
+      <GlassTuner />
       {creating && <NewTask onClose={() => setCreating(false)} />}
+      {editingProfile && <EditProfile onClose={() => setEditingProfile(false)} />}
       {taskId !== undefined && (
         <TaskDetails key={taskId} id={taskId} onClose={() => setTaskId(undefined)} />
       )}
     </BoardContext.Provider>
   );
 }
+function AppearanceControls() {
+  const tr = useI18n();
+  const { theme, language } = usePreferences();
+  const [error, setError] = useState(false);
+  const update = (change: Partial<Preferences>) => {
+    try {
+      setPreferences(change);
+      setError(false);
+    } catch (cause) {
+      console.error('Cannot save Baton appearance preferences.', cause);
+      setError(true);
+    }
+  };
+  const themeLabel = tr(theme === 'dark' ? '切换到亮色' : '切换到暗色');
+  return (
+    <div className="appearance-controls" role="group" aria-label={tr('界面设置')}>
+      <button
+        className="icon-button theme-toggle"
+        type="button"
+        aria-label={themeLabel}
+        title={themeLabel}
+        onClick={() => update({ theme: theme === 'dark' ? 'light' : 'dark' })}
+      >
+        {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
+      </button>
+      <select
+        className="language-select"
+        aria-label={tr('界面语言')}
+        value={language}
+        onChange={(event) => update({ language: event.target.value as Language })}
+      >
+        <option value="zh-CN" lang="zh-CN">
+          中文
+        </option>
+        <option value="en" lang="en">
+          English
+        </option>
+      </select>
+      {error && (
+        <p className="appearance-error" role="alert">
+          {tr('无法保存界面设置，请检查浏览器存储权限。')}
+        </p>
+      )}
+    </div>
+  );
+}
+function EditProfile({ onClose }: { onClose: () => void }) {
+  const tr = useI18n();
+  const { me } = useBoard();
+  const [nickname, setNickname] = useState(me.display_name ?? '');
+  const action = useAction();
+  return (
+    <Dialog title={tr('修改昵称')} onClose={onClose}>
+      <form
+        className="form-stack"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          try {
+            await action.mutateAsync({
+              operation: 'update_profile',
+              input: { display_name: nickname },
+            });
+            onClose();
+          } catch {
+            /* Error below; keep the draft available for retry. */
+          }
+        }}
+      >
+        <label>
+          {tr('昵称')}
+          <input
+            value={nickname}
+            onChange={(event) => setNickname(event.target.value)}
+            maxLength={80}
+            autoComplete="nickname"
+            placeholder={tr('你希望被怎样称呼')}
+            aria-describedby="nickname-hint"
+            disabled={action.isPending}
+            autoFocus
+          />
+        </label>
+        <p id="nickname-hint" className="muted small">
+          {tr('留空则不显示称呼。')}
+        </p>
+        <ErrorNotice error={action.error} />
+        <div className="form-actions">
+          <button type="button" className="button" onClick={onClose} disabled={action.isPending}>
+            {tr('取消')}
+          </button>
+          <button
+            className="button primary"
+            disabled={action.isPending || nickname.trim() === (me.display_name?.trim() ?? '')}
+          >
+            {action.isPending ? tr('保存中…') : tr('保存')}
+          </button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
 function LockBanner({ lock }: { lock?: WriteLock }) {
+  const tr = useI18n();
   const [mode, setMode] = useState<'acquire' | 'release'>();
   const [reason, setReason] = useState('');
   const [repository, setRepository] = useState('');
@@ -232,17 +415,20 @@ function LockBanner({ lock }: { lock?: WriteLock }) {
   const { openTask, repositories } = useBoard();
   return (
     <>
-      <div className={`lock-banner ${lock?.holder ? 'held' : ''}`}>
+      <div className={`lock-banner ${lock?.holder ? 'held' : 'idle'}`}>
         <span className="lock-symbol">
-          {lock?.holder ? <LockKeyhole size={18} /> : <UnlockKeyhole size={18} />}
+          {lock?.holder ? <LockKeyhole size={17} /> : <UnlockKeyhole size={15} />}
         </span>
         <div>
-          <strong>{lock?.holder ? `@${lock.holder} 正在持有写入权` : '按仓库协调写入'}</strong>
-          <span>
-            {lock?.holder
-              ? `${lock.repository ?? '旧版本写入锁：请检查原工作目录后释放'} · ${ago(lock.acquired_at)}`
-              : '同一仓库由一位参与者修改，不同仓库可同时进行。'}
-          </span>
+          <strong>
+            {lock?.holder ? tr('@{0} 正在持有写入权', lock.holder) : tr('按仓库协调写入')}
+          </strong>
+          {lock?.holder && (
+            <span>
+              {lock.repository ?? tr('旧版本写入锁：请检查原工作目录后释放')} ·{' '}
+              {ago(lock.acquired_at)}
+            </span>
+          )}
         </div>
         {lock?.task_id && (
           <button className="text-button mono" onClick={() => openTask(lock.task_id!)}>
@@ -257,18 +443,18 @@ function LockBanner({ lock }: { lock?: WriteLock }) {
             setMode(lock?.holder ? 'release' : 'acquire');
           }}
         >
-          {lock?.holder ? '处理写入锁' : '我来改'}
+          {lock?.holder ? tr('处理写入锁') : tr('我来改')}
         </button>
       </div>
       {mode && (
         <Dialog
-          title={mode === 'acquire' ? '取得代码写入权' : '释放代码写入权'}
+          title={mode === 'acquire' ? tr('取得代码写入权') : tr('释放代码写入权')}
           onClose={() => setMode(undefined)}
         >
           <p className="muted">
             {mode === 'acquire'
-              ? '选择要修改的仓库。同一仓库的代码任务将等待你完成，结束修改后请回来释放。'
-              : '请先检查并保存当前工作目录的改动。释放后，原持锁任务会被冻结，避免继续写入。'}
+              ? tr('选择要修改的仓库。同一仓库的代码任务将等待你完成，结束修改后请回来释放。')
+              : tr('请先检查并保存当前工作目录的改动。释放后，原持锁任务会被冻结，避免继续写入。')}
           </p>
           <form
             className="form-stack"
@@ -287,13 +473,13 @@ function LockBanner({ lock }: { lock?: WriteLock }) {
           >
             {mode === 'acquire' && (
               <label>
-                仓库路径
+                {tr('仓库路径')}
                 <input
                   value={repository}
                   onChange={(e) => setRepository(e.target.value)}
                   required
                   list="lock-repositories"
-                  placeholder="服务所在机器上的 Git 仓库绝对路径"
+                  placeholder={tr('服务所在机器上的 Git 仓库绝对路径')}
                 />
                 <datalist id="lock-repositories">
                   {repositories.map((r) => (
@@ -303,7 +489,7 @@ function LockBanner({ lock }: { lock?: WriteLock }) {
               </label>
             )}
             <label>
-              说明
+              {tr('说明')}
               <textarea
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
@@ -314,7 +500,7 @@ function LockBanner({ lock }: { lock?: WriteLock }) {
             </label>
             <ErrorNotice error={action.error} />
             <button className="button primary" disabled={action.isPending}>
-              {mode === 'acquire' ? '取得写入权' : '已检查工作目录，释放写入权'}
+              {mode === 'acquire' ? tr('取得写入权') : tr('已检查工作目录，释放写入权')}
             </button>
           </form>
         </Dialog>
@@ -323,6 +509,7 @@ function LockBanner({ lock }: { lock?: WriteLock }) {
   );
 }
 function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void }) {
+  const tr = useI18n();
   const { openTask, participants } = useBoard();
   const [actor, setActor] = useState('');
   const [activityTask, setActivityTask] = useState('');
@@ -342,32 +529,39 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
   });
   const total = Object.values(data?.counts ?? {}).reduce((sum, n) => sum + (n ?? 0), 0);
   const agents = participants.filter((p) => p.kind === 'agent');
-  const metrics: { label: string; value: number; note: string; icon: ReactNode; page: Page }[] = [
+  const metrics: {
+    label: string;
+    value: number;
+    note?: string;
+    icon: ReactNode;
+    page: Page;
+    alert?: boolean;
+  }[] = [
     {
-      label: '全部任务',
+      label: tr('全部任务'),
       value: total,
-      note: `${data?.counts.done ?? 0} 项已完成`,
+      note: tr('{0} 项已完成', data?.counts.done ?? 0),
       icon: <Columns3 size={17} />,
       page: 'board',
     },
     {
-      label: '正在进行',
+      label: tr('正在进行'),
       value: data?.counts.in_progress ?? 0,
-      note: `${agents.filter((p) => p.status !== 'offline').length} 个 Agent 最近活跃`,
+      note: tr('{0} 个 Agent 最近活跃', agents.filter((p) => p.status !== 'offline').length),
       icon: <Activity size={17} />,
       page: 'agents',
     },
     {
-      label: '等待审批',
+      label: tr('等待审批'),
       value: data?.approvals.length ?? 0,
-      note: `${data?.counts.in_review ?? 0} 项等待验收`,
+      note: tr('{0} 项等待验收', data?.counts.in_review ?? 0),
       icon: <ShieldCheck size={17} />,
       page: 'board',
+      alert: Boolean(data?.approvals.length),
     },
     {
-      label: '@ 我的消息',
+      label: tr('@ 我的消息'),
       value: data?.unread ?? 0,
-      note: '需要你关注的上下文',
       icon: <InboxIcon size={17} />,
       page: 'inbox',
     },
@@ -376,20 +570,26 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
     <>
       <div className="metrics">
         {metrics.map((m) => (
-          <button className="metric" aria-label={m.label} key={m.label} onClick={() => go(m.page)}>
+          <button
+            className={`metric ${m.alert ? 'alert' : ''}`}
+            aria-label={m.label}
+            key={m.page}
+            onClick={() => go(m.page)}
+          >
             <span>
               {m.label}
               {m.icon}
             </span>
-            <strong>{m.value.toString().padStart(2, '0')}</strong>
-            <small>{m.note}</small>
+            <strong>{m.value.toLocaleString(locale())}</strong>
+            {m.note && <small>{m.note}</small>}
           </button>
         ))}
       </div>
+      <FlowBar counts={data?.counts} onOpen={() => go('board')} />
       <div className="overview-grid">
         <section className="panel agents-panel">
           <div className="panel-heading">
-            <h2>Agent 状态</h2>
+            <h2>{tr('Agent 状态')}</h2>
             <span className="count-circle">{agents.length}</span>
           </div>
           {agents.map((p) => (
@@ -403,9 +603,9 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
                 <span className={`presence ${p.status}`} title={p.status} />
               </div>
               {p.frozen ? (
-                <span className="tag danger">已暂停</span>
+                <span className="tag danger">{tr('已暂停')}</span>
               ) : (
-                <span className={`status-text ${p.status}`}>{availability[p.status]}</span>
+                <span className={`status-text ${p.status}`}>{tr(availability[p.status])}</span>
               )}
               {p.current_tasks?.length ? (
                 p.current_tasks.map((t) => (
@@ -416,29 +616,29 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
                   </button>
                 ))
               ) : (
-                <p className="muted small">暂未持有任务</p>
+                <p className="muted small">{tr('暂未持有任务')}</p>
               )}
               <div className="agent-row-foot">
                 <span>{ago(p.last_seen_at)}</span>
-                {Boolean(p.unread) && <span>{p.unread} 条未读</span>}
+                {Boolean(p.unread) && <span>{tr('{0} 条未读', p.unread)}</span>}
               </div>
             </div>
           ))}
-          {!agents.length && <Empty title="尚无 Agent" />}
+          {!agents.length && <Empty title={tr('尚无 Agent')} />}
           <button className="panel-link" onClick={() => go('agents')}>
-            查看全部参与者
+            {tr('查看全部参与者')}
             <ArrowUpRight size={14} />
           </button>
         </section>
         <section className="panel activity-panel">
           <div className="panel-heading">
-            <h2>实时活动</h2>
+            <h2>{tr('实时活动')}</h2>
             <select
-              aria-label="按参与者筛选活动"
+              aria-label={tr('按参与者筛选活动')}
               value={actor}
               onChange={(e) => setActor(e.target.value)}
             >
-              <option value="">全部参与者</option>
+              <option value="">{tr('全部参与者')}</option>
               {participants.map((p) => (
                 <option key={p.handle} value={p.handle}>
                   @{p.handle}
@@ -448,37 +648,37 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
           </div>
           <div className="activity-filters">
             <input
-              aria-label="按任务筛选活动"
+              aria-label={tr('按任务筛选活动')}
               type="number"
               min="1"
-              placeholder="任务 ID"
+              placeholder={tr('任务 ID')}
               value={activityTask}
               onChange={(e) => setActivityTask(e.target.value)}
             />
             <select
-              aria-label="按类型筛选活动"
+              aria-label={tr('按类型筛选活动')}
               value={activityType}
               onChange={(e) => setActivityType(e.target.value)}
             >
-              <option value="">全部活动类型</option>
-              <option value="task.created">创建任务</option>
-              <option value="task.status_changed">状态变化</option>
-              <option value="message.posted">消息</option>
-              <option value="approval.requested">申请审批</option>
-              <option value="lock.acquired">取得写入权</option>
-              <option value="lock.released">释放写入权</option>
+              <option value="">{tr('全部活动类型')}</option>
+              <option value="task.created">{tr('创建任务')}</option>
+              <option value="task.status_changed">{tr('状态变化')}</option>
+              <option value="message.posted">{tr('消息')}</option>
+              <option value="approval.requested">{tr('申请审批')}</option>
+              <option value="lock.acquired">{tr('取得写入权')}</option>
+              <option value="lock.released">{tr('释放写入权')}</option>
             </select>
           </div>
           <EventList
             actor={actor || undefined}
             taskId={activityTask ? Number(activityTask) : undefined}
             type={activityType || undefined}
+            compact
           />
         </section>
         <aside className="attention-panel">
           <div className="panel-heading">
-            <h2>需要我处理</h2>
-            <CircleHelp size={16} />
+            <h2>{tr('需要我处理')}</h2>
           </div>
           <ErrorNotice error={inbox.error ?? reviewing.error} />
           {data?.approvals.map((a) => (
@@ -487,7 +687,7 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
               key={`a${a.id}`}
               onClick={() => openTask(a.task_id)}
             >
-              <span className="eyebrow">待审批 · {statusNames[a.to_status]}</span>
+              <span className="eyebrow">{tr('待审批 · {0}', tr(statusNames[a.to_status]))}</span>
               <strong>{a.title}</strong>
               <p>{a.reason}</p>
               <span className="small muted">
@@ -499,11 +699,11 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
           {data?.attention.map((t) => (
             <button className="attention-card blocked" key={t.id} onClick={() => openTask(t.id)}>
               <span className="eyebrow">
-                {t.lease_expired_at ? '租约到期' : t.frozen ? '任务已冻结' : '任务阻塞'}
+                {t.lease_expired_at ? tr('租约到期') : t.frozen ? tr('任务已冻结') : tr('任务阻塞')}
               </span>
               <strong>{t.title}</strong>
               <span className="small muted">
-                T-{t.id} · {t.assignee ? `@${t.assignee}` : '未分配'}
+                T-{t.id} · {t.assignee ? `@${t.assignee}` : tr('未分配')}
               </span>
             </button>
           ))}
@@ -511,7 +711,7 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
             ?.filter((t) => !data?.approvals.some((a) => a.task_id === t.id))
             .map((t) => (
               <button key={`r${t.id}`} className="attention-card" onClick={() => openTask(t.id)}>
-                <span className="eyebrow">等待验收</span>
+                <span className="eyebrow">{tr('等待验收')}</span>
                 <strong>{t.title}</strong>
                 <span className="small muted">T-{t.id}</span>
               </button>
@@ -520,7 +720,7 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
             ?.filter((n) => n.message.kind === 'question')
             .map((n) => (
               <button className="attention-card" key={`n${n.id}`} onClick={() => go('inbox')}>
-                <span className="eyebrow">有人在等你的回复</span>
+                <span className="eyebrow">{tr('有人在等你的回复')}</span>
                 <p>{n.message.body}</p>
                 <span className="small muted">@{n.message.author}</span>
               </button>
@@ -528,13 +728,13 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
           {(reviewPage > 0 || reviewing.data?.length === 20) && (
             <div className="pagination">
               <button disabled={reviewPage === 0} onClick={() => setReviewPage(reviewPage - 1)}>
-                上一页验收
+                {tr('上一页验收')}
               </button>
               <button
                 disabled={reviewing.data?.length !== 20}
                 onClick={() => setReviewPage(reviewPage + 1)}
               >
-                下一页验收
+                {tr('下一页验收')}
               </button>
             </div>
           )}
@@ -544,13 +744,13 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
                 disabled={questionPages.length === 1}
                 onClick={() => setQuestionPages(questionPages.slice(0, -1))}
               >
-                较新的提问
+                {tr('较新的提问')}
               </button>
               <button
                 disabled={inbox.data?.length !== 10}
                 onClick={() => setQuestionPages([...questionPages, inbox.data?.at(-1)?.id])}
               >
-                更早的提问
+                {tr('更早的提问')}
               </button>
             </div>
           )}
@@ -559,40 +759,95 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
             !reviewing.data?.length &&
             !inbox.data?.some((n) => n.message.kind === 'question') && (
               <div className="all-clear">
-                <span>✓</span>
-                <strong>暂时无需介入</strong>
-                <p>
-                  新的审批、阻塞和问题
-                  <br />
-                  会集中显示在这里。
-                </p>
+                <strong>{tr('暂时无需介入')}</strong>
               </div>
             )}
-          <div className="workflow-note">
-            <span className="eyebrow">HOW WE WORK</span>
-            <h3>
-              把工作交给 Agent，
-              <br />
-              把决定留在人手里。
-            </h3>
-            <p>
-              认领 → 执行 → 提交 → 验收
-              <br />
-              每一步都留下可追溯的记录。
-            </p>
-          </div>
         </aside>
       </div>
     </>
   );
 }
-const availability: Record<string, string> = {
+const flow: { key: string; label: string; statuses: TaskStatus[] }[] = [
+  { key: 'pending', label: '待开工', statuses: ['draft', 'open', 'claimed'] },
+  { key: 'progress', label: '进行中', statuses: ['in_progress'] },
+  { key: 'blocked', label: '受阻或待修改', statuses: ['blocked', 'changes_requested'] },
+  { key: 'review', label: '待验收', statuses: ['in_review'] },
+  { key: 'done', label: '已完成', statuses: ['done'] },
+];
+function FlowBar({ counts = {}, onOpen }: { counts?: OverviewData['counts']; onOpen: () => void }) {
+  const tr = useI18n();
+  const [hover, setHover] = useState<string>();
+  const rows = flow.map((f) => ({
+    ...f,
+    label: tr(f.label),
+    value: f.statuses.reduce((sum, s) => sum + (counts[s] ?? 0), 0),
+  }));
+  const total = rows.reduce((sum, r) => sum + r.value, 0);
+  const focused = rows.find((r) => r.key === hover);
+  const share = (value: number) => Math.round((value / (total || 1)) * 100);
+  const dim = (key: string) => (hover && hover !== key ? 'dim' : '');
+  return (
+    <section className="panel flow-panel" aria-labelledby="flow-title">
+      <div className="flow-head">
+        <h2 id="flow-title">{tr('任务流向')}</h2>
+        <span className="flow-readout" aria-live="polite">
+          {focused
+            ? tr('{0} · {1} 项 · {2}%', focused.label, focused.value, share(focused.value))
+            : total
+              ? tr('共 {0} 项，不含已取消', total)
+              : tr('还没有任务')}
+        </span>
+      </div>
+      <div
+        className="flow-bar"
+        role="img"
+        aria-label={rows.map((r) => tr('{0} {1} 项', r.label, r.value)).join(', ')}
+        onMouseLeave={() => setHover(undefined)}
+      >
+        {total ? (
+          rows
+            .filter((r) => r.value)
+            .map((r) => (
+              <span
+                key={r.key}
+                className={`flow-seg flow-${r.key} ${dim(r.key)}`}
+                style={{ flexGrow: r.value }}
+                onMouseEnter={() => setHover(r.key)}
+              />
+            ))
+        ) : (
+          <span className="flow-seg flow-empty" />
+        )}
+      </div>
+      <ul className="flow-legend">
+        {rows.map((r) => (
+          <li key={r.key}>
+            <button
+              className={dim(r.key)}
+              onMouseEnter={() => setHover(r.key)}
+              onMouseLeave={() => setHover(undefined)}
+              onFocus={() => setHover(r.key)}
+              onBlur={() => setHover(undefined)}
+              onClick={onOpen}
+            >
+              <i className={`flow-swatch flow-${r.key}`} />
+              <span>{r.label}</span>
+              <strong>{r.value}</strong>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+const availability: Record<Participant['status'], string> = {
   online: '最近活跃',
   working: '正在工作',
   waiting: '等待中',
   offline: '暂无活动',
 };
 function Participants() {
+  const tr = useI18n();
   const { participants } = useBoard();
   const [selected, setSelected] = useState<Participant>();
   const [freezing, setFreezing] = useState<Participant>();
@@ -612,30 +867,38 @@ function Participants() {
               <span className={`presence ${p.status}`} />
             </div>
             <div className="participant-info">
-              <span title="Agent 状态按最近请求计算；90 秒无请求表示暂无活动，不代表会话已经结束。">
-                状态<strong>{p.frozen ? '已暂停' : availability[p.status]}</strong>
+              <span
+                title={tr(
+                  'Agent 状态按最近请求计算；90 秒无请求表示暂无活动，不代表会话已经结束。',
+                )}
+              >
+                {tr('状态')}
+                <strong>{p.frozen ? tr('已暂停') : tr(availability[p.status])}</strong>
               </span>
               <span>
-                最后活动<strong>{ago(p.last_seen_at)}</strong>
+                {tr('最后活动')}
+                <strong>{ago(p.last_seen_at)}</strong>
               </span>
               <span>
-                未读消息<strong>{p.unread ?? 0}</strong>
+                {tr('未读消息')}
+                <strong>{p.unread ?? 0}</strong>
               </span>
               {p.kind === 'agent' && (
                 <>
                   <span>
-                    已完成<strong>{p.statistics?.completed ?? 0}</strong>
+                    {tr('已完成')}
+                    <strong>{p.statistics?.completed ?? 0}</strong>
                   </span>
-                  <span title="已完成任务首次开工到通过验收的平均耗时，包含等待和返工">
-                    平均完成时间
+                  <span title={tr('已完成任务首次开工到通过验收的平均耗时，包含等待和返工')}>
+                    {tr('平均完成时间')}
                     <strong>
                       {p.statistics?.average_completion_ms == null
                         ? '—'
-                        : `${Math.round(p.statistics.average_completion_ms / 60000)} 分钟`}
+                        : tr('{0} 分钟', Math.round(p.statistics.average_completion_ms / 60000))}
                     </strong>
                   </span>
-                  <span title="请求修改的验收次数 ÷ 全部验收次数">
-                    退回率
+                  <span title={tr('请求修改的验收次数 ÷ 全部验收次数')}>
+                    {tr('退回率')}
                     <strong>
                       {p.statistics?.rejection_rate == null
                         ? '—'
@@ -648,7 +911,7 @@ function Participants() {
             {p.status_note && <p className="message-body">{p.status_note}</p>}
             <div className="form-actions">
               <button className="button" onClick={() => setSelected(p)}>
-                活动与任务
+                {tr('活动与任务')}
               </button>
               {p.kind === 'agent' && (
                 <button
@@ -659,7 +922,7 @@ function Participants() {
                   }}
                 >
                   <Snowflake size={14} />
-                  {p.frozen ? '恢复' : '暂停'}
+                  {p.frozen ? tr('恢复') : tr('暂停')}
                 </button>
               )}
             </div>
@@ -668,7 +931,7 @@ function Participants() {
       </div>
       {freezing && (
         <Dialog
-          title={`${freezing.frozen ? '恢复' : '暂停'} @${freezing.handle}`}
+          title={`${freezing.frozen ? tr('恢复') : tr('暂停')} @${freezing.handle}`}
           onClose={() => setFreezing(undefined)}
         >
           <form
@@ -686,9 +949,11 @@ function Participants() {
               }
             }}
           >
-            <p className="muted">暂停后，该 Agent 的所有写操作都会被拒绝，已有写入锁仍会保留。</p>
+            <p className="muted">
+              {tr('暂停后，该 Agent 的所有写操作都会被拒绝，已有写入锁仍会保留。')}
+            </p>
             <label>
-              说明
+              {tr('说明')}
               <textarea
                 required
                 value={reason}
@@ -699,14 +964,14 @@ function Participants() {
             </label>
             <ErrorNotice error={action.error} />
             <button className="button primary" disabled={action.isPending}>
-              确认{freezing.frozen ? '恢复' : '暂停'}
+              {tr('确认{0}', freezing.frozen ? tr('恢复') : tr('暂停'))}
             </button>
           </form>
         </Dialog>
       )}
       {selected && (
         <Dialog
-          title={`@${selected.handle} · 活动与任务`}
+          title={tr('@{0} · 活动与任务', selected.handle)}
           onClose={() => setSelected(undefined)}
           wide
         >
@@ -717,6 +982,7 @@ function Participants() {
   );
 }
 function ParticipantHistory({ participant }: { participant: Participant }) {
+  const tr = useI18n();
   const [page, setPage] = useState(0);
   const tasks = useData<TaskSummary[]>('list_tasks', {
     assignee: participant.handle,
@@ -727,7 +993,8 @@ function ParticipantHistory({ participant }: { participant: Participant }) {
   return (
     <>
       <h3>
-        名下任务 <span className="muted">第 {page + 1} 页</span>
+        {tr('名下任务')}
+        <span className="muted">{tr('第 {0} 页', page + 1)}</span>
       </h3>
       <ErrorNotice error={tasks.error} />
       {tasks.data?.map((t) => (
@@ -740,26 +1007,27 @@ function ParticipantHistory({ participant }: { participant: Participant }) {
       {(page > 0 || tasks.data?.length === 50) && (
         <div className="pagination">
           <button disabled={page === 0} onClick={() => setPage(page - 1)}>
-            上一页
+            {tr('上一页')}
           </button>
           <button disabled={tasks.data?.length !== 50} onClick={() => setPage(page + 1)}>
-            下一页
+            {tr('下一页')}
           </button>
         </div>
       )}
-      <h3 className="section-gap">活动记录</h3>
+      <h3 className="section-gap">{tr('活动记录')}</h3>
       <EventList actor={participant.handle} />
     </>
   );
 }
 function Decisions() {
+  const tr = useI18n();
   const query = useData<Message[]>('list_decisions', { limit: 200 });
   const { openTask } = useBoard();
   return (
     <section className="panel">
       <div className="panel-heading">
-        <h2>所有决策</h2>
-        <span className="muted">按最近时间排列</span>
+        <h2>{tr('所有决策')}</h2>
+        <span className="muted">{tr('按最近时间排列')}</span>
       </div>
       <ErrorNotice error={query.error} />
       {query.data?.length ? (
@@ -768,25 +1036,28 @@ function Decisions() {
             <MessageCard message={message} />
             {message.task_id && (
               <button className="text-button" onClick={() => openTask(message.task_id!)}>
-                查看 T-{message.task_id}
+                {tr('查看 T-{0}', message.task_id)}
                 <ArrowUpRight size={13} />
               </button>
             )}
           </div>
         ))
       ) : (
-        <Empty title="还没有决策记录">发送类型为「决策」的消息，就会汇总到这里。</Empty>
+        <Empty title={tr('还没有决策记录')}>
+          {tr('发送类型为「决策」的消息，就会汇总到这里。')}
+        </Empty>
       )}
     </section>
   );
 }
 function ProjectSettings() {
+  const tr = useI18n();
   const query = useData<Settings>('get_settings');
   return (
     <section className="panel settings-panel">
       <div className="panel-heading">
-        <h2>协作规则</h2>
-        <span className="tag">Human only</span>
+        <h2>{tr('协作规则')}</h2>
+        <span className="tag">{tr('仅限人工')}</span>
       </div>
       <ErrorNotice error={query.error} />
       {query.data && <SettingsForm initial={query.data} />}
@@ -794,6 +1065,7 @@ function ProjectSettings() {
   );
 }
 function SettingsForm({ initial }: { initial: Settings }) {
+  const tr = useI18n();
   const [value, setValue] = useState(initial);
   const [gates, setGates] = useState(JSON.stringify(initial.gates, null, 2));
   const [roles, setRoles] = useState(JSON.stringify(initial.roles, null, 2));
@@ -821,22 +1093,23 @@ function SettingsForm({ initial }: { initial: Settings }) {
       }}
     >
       <label>
-        审批方式
+        {tr('审批方式')}
         <select
           value={value.approval_mode}
           onChange={(e) =>
             setValue({ ...value, approval_mode: e.target.value as Settings['approval_mode'] })
           }
         >
-          <option value="plan">仅审批计划</option>
-          <option value="custom">自定义审批规则</option>
+          <option value="plan">{tr('仅审批计划')}</option>
+          <option value="custom">{tr('自定义审批规则')}</option>
         </select>
       </label>
       {value.approval_mode === 'plan' && (
         <>
           <p className="muted small">
-            计划批准后，实现、独立验收和返工自动推进。达到返工上限或报告合入冲突时转交人工。由主
-            Agent 调度子 Agent，服务本身不启动模型。
+            {tr(
+              '计划批准后，实现、独立验收和返工自动推进。达到返工上限或报告合入冲突时转交人工。由主 Agent 调度子 Agent，服务本身不启动模型。',
+            )}
           </p>
           <label className="checkbox-label">
             <input
@@ -844,16 +1117,16 @@ function SettingsForm({ initial }: { initial: Settings }) {
               checked={value.merge_approval}
               onChange={(e) => setValue({ ...value, merge_approval: e.target.checked })}
             />
-            分支合入前需要人工审批
+            {tr('分支合入前需要人工审批')}
           </label>
           <p className="muted small">
-            仅作用于「合入」任务；使用现有分支顺序工作时，无需增加合入任务。
+            {tr('仅作用于「合入」任务；使用现有分支顺序工作时，无需增加合入任务。')}
           </p>
         </>
       )}
       <div className="form-row">
         <label>
-          认领租约（分钟）
+          {tr('认领租约（分钟）')}
           <input
             type="number"
             min="0.01"
@@ -864,7 +1137,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
           />
         </label>
         <label>
-          每人进行中任务上限
+          {tr('每人进行中任务上限')}
           <input
             type="number"
             min="1"
@@ -877,7 +1150,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
       </div>
       <div className="form-row">
         <label>
-          最多返工次数
+          {tr('最多返工次数')}
           <input
             type="number"
             min="1"
@@ -888,7 +1161,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
           />
         </label>
         <label>
-          Agent 每分钟消息上限
+          {tr('Agent 每分钟消息上限')}
           <input
             type="number"
             min="1"
@@ -903,7 +1176,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
       </div>
       {value.approval_mode === 'custom' && (
         <label>
-          人工审批规则
+          {tr('人工审批规则')}
           <textarea
             className="code-input"
             rows={12}
@@ -914,7 +1187,7 @@ function SettingsForm({ initial }: { initial: Settings }) {
         </label>
       )}
       <label>
-        各角色可创建的任务类型
+        {tr('各角色可创建的任务类型')}
         <textarea
           className="code-input"
           rows={10}
@@ -926,12 +1199,12 @@ function SettingsForm({ initial }: { initial: Settings }) {
       <ErrorNotice error={error ? new Error(error) : undefined} />
       {saved && (
         <p className="success" role="status">
-          设置已保存
+          {tr('设置已保存')}
         </p>
       )}
       <div className="form-actions">
         <button className="button primary" disabled={action.isPending}>
-          保存设置
+          {tr('保存设置')}
         </button>
       </div>
     </form>

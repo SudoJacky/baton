@@ -66,7 +66,9 @@ type WorkerRun = {
   lease_until: string;
   created_at: string;
 };
-const participantColumns = 'handle,kind,role,display_name,status,status_note,frozen,last_seen_at';
+// NULL uses the configured name; an empty override explicitly clears the nickname.
+const participantColumns =
+  "handle,kind,role,NULLIF(COALESCE(display_name_override,display_name),'') AS display_name,status,status_note,frozen,last_seen_at";
 const activeStatuses = ['claimed', 'in_progress', 'blocked', 'changes_requested'];
 const leasedStatuses = ['claimed', 'in_progress', 'changes_requested'];
 const terminal = (t: TaskSummary) => ['done', 'cancelled'].includes(t.status);
@@ -2552,6 +2554,18 @@ export class Board {
             unread: this.unread(actor.handle),
             pending: this.pending(actor),
           } satisfies Identity;
+        case 'update_profile': {
+          const { display_name } = schemas.update_profile.parse(parsed);
+          this.store.run(
+            'UPDATE participants SET display_name_override=? WHERE handle=?',
+            display_name,
+            actor.handle,
+          );
+          this.event(actor.handle, 'participant.updated', null, {
+            display_name: display_name || null,
+          });
+          return this.participant(actor.handle);
+        }
         case 'get_overview':
           return this.overview(actor);
         case 'list_participants':

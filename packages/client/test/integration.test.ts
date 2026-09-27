@@ -577,6 +577,7 @@ it('keeps three conversations independent through one shared MCP without any per
     'release_lock',
     'transition_task',
     'put_settings',
+    'update_profile',
     'freeze_participant',
     'reject_approval',
   ])
@@ -664,7 +665,7 @@ it('init creates local profiles without human credentials and refuses overwrite'
   expect(await readLocalAccess(file)).toHaveLength(43);
   expect(JSON.parse(result.stdout)).toMatchObject({ human: 'dax', config: file });
   expect(result.stdout).not.toMatch(/login_code|token/);
-  expect(configSchema.parse(parse(before)).humans.dax).toEqual({ display_name: 'dax' });
+  expect(configSchema.parse(parse(before)).humans.dax).toEqual({});
   expect((await f.cli(['--config', file, 'init', '--json'])).code).toBe(1);
   expect(await readFile(file, 'utf8')).toBe(before);
 });

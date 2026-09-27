@@ -1,9 +1,19 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useI18n, tr, locale } from './i18n.js';
+import {
+  Component,
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, BoardClient } from '@baton/client';
 import type { BoardEvent, Input, Operation, Participant, TaskStatus } from '@baton/shared';
 import { schemas } from '@baton/shared';
 import { X, AlertCircle } from 'lucide-react';
+import { useLiquidGlass } from './glass.js';
 import { Markdown } from './Markdown.js';
 
 export const statusNames: Record<TaskStatus, string> = {
@@ -26,6 +36,56 @@ export const typeNames = {
   question: '问题',
   merge: '合入',
 };
+export const kindNames: Record<string, string> = {
+  comment: '讨论',
+  question: '提问',
+  decision: '决策',
+  report: '报告',
+  handoff: '交接',
+  system: '系统',
+};
+export const mentionStateNames: Record<string, string> = {
+  unread: '未读',
+  read: '已读',
+  resolved: '已处理',
+};
+const lunarDays = ['初', '十', '廿', '三'];
+const numerals = '十一二三四五六七八九';
+/** 农历日期，例如「八月十六」。浏览器不支持农历时返回空字符串。 */
+export const lunarDate = (date = new Date()) => {
+  try {
+    const parts = new Intl.DateTimeFormat('zh-CN-u-ca-chinese', {
+      month: 'long',
+      day: 'numeric',
+    }).formatToParts(date);
+    const month = parts.find((p) => p.type === 'month')?.value ?? '';
+    const day = Number(parts.find((p) => p.type === 'day')?.value);
+    if (!month || !day) return '';
+    const name =
+      day === 10
+        ? '初十'
+        : day === 20
+          ? '二十'
+          : day === 30
+            ? '三十'
+            : `${lunarDays[Math.floor(day / 10)]}${numerals[day % 10]}`;
+    return `${month}${name}`;
+  } catch {
+    return '';
+  }
+};
+export const greeting = (date = new Date()) => {
+  const hour = date.getHours();
+  return hour < 5
+    ? tr('夜深了')
+    : hour < 11
+      ? tr('早上好')
+      : hour < 13
+        ? tr('中午好')
+        : hour < 18
+          ? tr('下午好')
+          : tr('晚上好');
+};
 export const errorText = (error: unknown) =>
   error instanceof ApiError
     ? `${error.message} ${error.next}`
@@ -34,23 +94,23 @@ export const errorText = (error: unknown) =>
       : String(error);
 export const time = (value?: string | null) =>
   value
-    ? new Date(value).toLocaleString('zh-CN', {
+    ? new Date(value).toLocaleString(locale(), {
         month: '2-digit',
         day: '2-digit',
         hour: '2-digit',
         minute: '2-digit',
       })
-    : '尚无活动';
+    : tr('尚无活动');
 export const ago = (value?: string | null) => {
-  if (!value) return '尚无活动';
+  if (!value) return tr('尚无活动');
   const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 60000));
   return minutes < 1
-    ? '刚刚'
+    ? tr('刚刚')
     : minutes < 60
-      ? `${minutes} 分钟前`
+      ? tr('{0} 分钟前', minutes)
       : minutes < 1440
-        ? `${Math.floor(minutes / 60)} 小时前`
-        : `${Math.floor(minutes / 1440)} 天前`;
+        ? tr('{0} 小时前', Math.floor(minutes / 60))
+        : tr('{0} 天前', Math.floor(minutes / 1440));
 };
 type BoardContextType = {
   api: BoardClient;
@@ -155,26 +215,50 @@ export function ErrorNotice({ error }: { error: unknown }) {
     </div>
   ) : null;
 }
+/** 页面渲染出错时显示原因和恢复入口，而不是整屏空白。 */
+export class PageBoundary extends Component<{ children: ReactNode }, { error?: unknown }> {
+  state: { error?: unknown } = {};
+  static getDerivedStateFromError(error: unknown) {
+    return { error };
+  }
+  componentDidCatch(error: unknown) {
+    console.error('页面渲染失败', error);
+  }
+  render() {
+    if (this.state.error === undefined) return this.props.children;
+    return (
+      <div className="panel page-error">
+        <ErrorNotice error={this.state.error} />
+        <p className="muted">{tr('这个页面渲染时出错了，其他页面不受影响。')}</p>
+        <button className="button" onClick={() => location.reload()}>
+          {tr('重新加载')}
+        </button>
+      </div>
+    );
+  }
+}
 export function Empty({ title, children }: { title: string; children?: ReactNode }) {
   return (
     <div className="empty">
-      <div className="empty-mark">↗</div>
+      <div className="empty-mark" aria-hidden="true" />
       <strong>{title}</strong>
       {children && <p>{children}</p>}
     </div>
   );
 }
 export function Badge({ status }: { status: TaskStatus }) {
+  const tr = useI18n();
   return (
     <span className={`badge status-${status}`}>
       <i />
-      {statusNames[status]}
+      {tr(statusNames[status])}
     </span>
   );
 }
 export function Avatar({ handle, size = 'normal' }: { handle: string; size?: 'normal' | 'small' }) {
+  const tone = [...handle].reduce((sum, c) => sum * 31 + c.charCodeAt(0), 7) >>> 0;
   return (
-    <span className={`avatar ${size}`} data-color={handle.charCodeAt(0) % 4}>
+    <span className={`avatar ${size}`} data-color={tone % 6} aria-hidden="true">
       {handle.slice(0, 2).toUpperCase()}
     </span>
   );
@@ -190,16 +274,19 @@ export function Dialog({
   onClose: () => void;
   wide?: boolean;
 }) {
-  const ref = useRef<HTMLDialogElement>(null);
+  const tr = useI18n();
+  const [dialog, setDialog] = useState<HTMLDialogElement | null>(null);
   useEffect(() => {
-    const dialog = ref.current!;
+    if (!dialog) return;
     dialog.showModal();
     return () => dialog.close();
-  }, []);
+  }, [dialog]);
+  // 对话框里是表单与正文，折射保持克制、不做色散；模糊沿用 CSS 里更重的磨砂
+  useLiquidGlass(dialog, { displacementScale: 20 });
   return (
     <dialog
-      ref={ref}
-      className={wide ? 'dialog wide' : 'dialog'}
+      ref={setDialog}
+      className={wide ? 'dialog glass wide' : 'dialog glass'}
       onCancel={onClose}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
@@ -208,7 +295,7 @@ export function Dialog({
       <div className="dialog-body">
         <header className="dialog-header">
           <h2>{title}</h2>
-          <button className="icon-button" aria-label="关闭" onClick={onClose}>
+          <button className="icon-button" aria-label={tr('关闭')} onClick={onClose}>
             <X size={20} />
           </button>
         </header>
@@ -221,15 +308,24 @@ export function EventList({
   taskId,
   actor,
   type,
+  compact = false,
 }: {
   taskId?: number;
   actor?: string;
   type?: string;
+  /** 限高滚动并折叠长内容，适合总览这类扫读场景。 */
+  compact?: boolean;
 }) {
+  const tr = useI18n();
   const { api, openTask } = useBoard();
   const [pages, setPages] = useState<(number | undefined)[]>([undefined]);
+  const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
+  const timeline = useRef<HTMLDivElement>(null);
   useEffect(() => setPages([undefined]), [taskId, actor, type]);
   const before = pages.at(-1);
+  useEffect(() => {
+    if (compact) timeline.current?.scrollTo(0, 0);
+  }, [compact, taskId, actor, type, before]);
   const query = useQuery({
     queryKey: ['board', 'timeline', taskId, actor, type, before],
     queryFn: async () =>
@@ -245,52 +341,85 @@ export function EventList({
       ).data,
   });
   if (query.error) return <ErrorNotice error={query.error} />;
-  if (!query.data) return <p className="muted">正在读取活动…</p>;
+  if (!query.data) return <p className="muted">{tr('正在读取活动…')}</p>;
   const events = query.data;
   if (!events.length && pages.length === 1)
-    return <Empty title="协作从这里开始">发布任务或发送一条消息，活动会实时出现在这里。</Empty>;
+    return (
+      <Empty title={tr('协作从这里开始')}>
+        {tr('发布任务或发送一条消息，活动会实时出现在这里。')}
+      </Empty>
+    );
   return (
-    <div className="timeline">
-      {events.map((event) => {
-        const message = event.payload.message as { body: string; kind: string } | undefined;
-        const action = eventNames[event.type] ?? event.type;
-        return (
-          <article className="event" key={event.id}>
-            <div className="event-marker">{message ? '↗' : '•'}</div>
-            <div className="event-content">
-              <div className="event-meta">
-                <strong>{event.actor ? `@${event.actor}` : '系统'}</strong>
-                <span>{action}</span>
-                {event.task_id && (
-                  <button className="text-button mono" onClick={() => openTask(event.task_id!)}>
-                    T-{event.task_id}
+    <>
+      <div
+        className={`timeline${compact ? ' timeline-compact' : ''}`}
+        ref={timeline}
+        role={compact ? 'region' : undefined}
+        aria-label={compact ? tr('实时活动列表') : undefined}
+        tabIndex={compact ? 0 : undefined}
+      >
+        {events.map((event) => {
+          const message = event.payload.message as { body: string; kind: string } | undefined;
+          const action = tr(eventNames[event.type] ?? event.type);
+          const body = message?.body ?? describeEvent(event);
+          const collapsible = compact && body.length > 160;
+          const isExpanded = expanded.has(event.id);
+          return (
+            <article className={`event ${message ? 'has-message' : ''}`} key={event.id}>
+              <div className="event-marker" aria-hidden="true" />
+              <div className="event-content">
+                <div className="event-meta">
+                  <strong>{event.actor ? `@${event.actor}` : tr('系统')}</strong>
+                  <span>{action}</span>
+                  {event.task_id && (
+                    <button className="text-button mono" onClick={() => openTask(event.task_id!)}>
+                      T-{event.task_id}
+                    </button>
+                  )}
+                  <time>{time(event.created_at)}</time>
+                </div>
+                <div className={collapsible && !isExpanded ? 'clamped' : undefined}>
+                  {message ? (
+                    <Markdown>{body}</Markdown>
+                  ) : (
+                    <p className="event-description">{body}</p>
+                  )}
+                </div>
+                {collapsible && (
+                  <button
+                    className="text-button small"
+                    aria-expanded={isExpanded}
+                    onClick={() =>
+                      setExpanded((current) => {
+                        const next = new Set(current);
+                        if (next.has(event.id)) next.delete(event.id);
+                        else next.add(event.id);
+                        return next;
+                      })
+                    }
+                  >
+                    {isExpanded ? tr('收起全文') : tr('展开全文')}
                   </button>
                 )}
-                <time>{time(event.created_at)}</time>
               </div>
-              {message ? (
-                <Markdown>{message.body}</Markdown>
-              ) : (
-                <p className="event-description">{describeEvent(event)}</p>
-              )}
-            </div>
-          </article>
-        );
-      })}
+            </article>
+          );
+        })}
+      </div>
       {(pages.length > 1 || events.length === 50) && (
         <div className="pagination">
           <button disabled={pages.length === 1} onClick={() => setPages(pages.slice(0, -1))}>
-            较新的活动
+            {tr('较新的活动')}
           </button>
           <button
             disabled={events.length < 50}
             onClick={() => setPages([...pages, events.at(-1)!.id])}
           >
-            更早的活动
+            {tr('更早的活动')}
           </button>
         </div>
       )}
-    </div>
+    </>
   );
 }
 const eventNames: Record<string, string> = {
@@ -315,14 +444,17 @@ const eventNames: Record<string, string> = {
   'agent.status_changed': '更新了在线状态',
   'channel.created': '创建了会话',
   'settings.updated': '更新了项目设置',
+  'participant.updated': '修改了昵称',
   'artifact.added': '添加了产物',
   'inbox.updated': '处理了收件箱',
   'task.frozen': '冻结了任务',
 };
 function describeEvent(event: BoardEvent): string {
   const p = event.payload;
+  if (event.type === 'participant.updated')
+    return p.display_name ? String(p.display_name) : tr('已清除昵称');
   if (p.from && p.to)
-    return `${statusNames[p.from as TaskStatus] ?? String(p.from)} → ${statusNames[p.to as TaskStatus] ?? String(p.to)}${p.reason ? ` · ${String(p.reason)}` : ''}`;
+    return `${tr(statusNames[p.from as TaskStatus] ?? String(p.from))} → ${tr(statusNames[p.to as TaskStatus] ?? String(p.to))}${p.reason ? ` · ${String(p.reason)}` : ''}`;
   if (p.task) return String((p.task as { title: string }).title);
   if (p.reason) return String(p.reason);
   if (p.holder) return `@${String(p.holder)}`;

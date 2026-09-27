@@ -1,3 +1,4 @@
+import { useI18n } from './i18n.js';
 import { useState, type FormEvent, type ReactNode } from 'react';
 import {
   DndContext,
@@ -48,6 +49,7 @@ import { Composer } from './messages.js';
 import { Markdown } from './Markdown.js';
 
 export function NewTask({ onClose }: { onClose: () => void }) {
+  const tr = useI18n();
   const [repository, setRepository] = useState('');
   const [title, setTitle] = useState('');
   const [type, setType] = useState('implement');
@@ -97,19 +99,21 @@ export function NewTask({ onClose }: { onClose: () => void }) {
     }
   };
   return (
-    <Dialog title="创建任务" onClose={onClose}>
+    <Dialog title={tr('创建任务')} onClose={onClose}>
       <form className="form-stack" onSubmit={submit}>
         {['plan', 'merge'].includes(type) && (
           <p className="muted small">
-            计划与合入任务先保存为草稿。计划批准后推进子任务；合入是否额外审批由项目设置决定。
+            {tr(
+              '计划与合入任务先保存为草稿。计划批准后推进子任务；合入是否额外审批由项目设置决定。',
+            )}
           </p>
         )}
         <label>
-          任务名称
+          {tr('任务名称')}
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="一个清晰、可以验收的工作单元"
+            placeholder={tr('一个清晰、可以验收的工作单元')}
             required
             maxLength={240}
             autoFocus
@@ -117,7 +121,7 @@ export function NewTask({ onClose }: { onClose: () => void }) {
         </label>
         <div className="form-row">
           <label>
-            类型
+            {tr('类型')}
             <select
               value={type}
               onChange={(e) => {
@@ -139,13 +143,13 @@ export function NewTask({ onClose }: { onClose: () => void }) {
             >
               {taskTypes.map((t) => (
                 <option key={t} value={t}>
-                  {typeNames[t]}
+                  {tr(typeNames[t])}
                 </option>
               ))}
             </select>
           </label>
           <label>
-            优先级
+            {tr('优先级')}
             <select value={priority} onChange={(e) => setPriority(e.target.value)}>
               {['P0', 'P1', 'P2', 'P3'].map((p) => (
                 <option key={p}>{p}</option>
@@ -153,17 +157,22 @@ export function NewTask({ onClose }: { onClose: () => void }) {
             </select>
           </label>
           <label>
-            建议角色
-            <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="不限" />
+            {tr('建议角色')}
+            <input
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              placeholder={tr('不限')}
+            />
           </label>
         </div>
         <label>
-          仓库路径<span className="label-hint">可稍后选择；代码任务开工前必须确定</span>
+          {tr('仓库路径')}
+          <span className="label-hint">{tr('可稍后选择；代码任务开工前必须确定')}</span>
           <input
             value={repository}
             onChange={(e) => setRepository(e.target.value)}
             list="task-repositories"
-            placeholder="服务所在机器上的 Git 仓库绝对路径"
+            placeholder={tr('服务所在机器上的 Git 仓库绝对路径')}
           />
           <datalist id="task-repositories">
             {repositories.map((r) => (
@@ -172,56 +181,57 @@ export function NewTask({ onClose }: { onClose: () => void }) {
           </datalist>
         </label>
         <label>
-          描述
+          {tr('描述')}
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             rows={4}
-            placeholder="目标、范围，以及为什么要做这件事…"
+            placeholder={tr('目标、范围，以及为什么要做这件事…')}
           />
         </label>
         <label>
-          验收标准<span className="label-hint">每行一条</span>
+          {tr('验收标准')}
+          <span className="label-hint">{tr('每行一条')}</span>
           <textarea
             value={criteria}
             onChange={(e) => setCriteria(e.target.value)}
             rows={3}
-            placeholder="完成后如何确认结果正确？"
+            placeholder={tr('完成后如何确认结果正确？')}
           />
         </label>
         <label>
-          交接上下文
+          {tr('交接上下文')}
           <textarea
             value={context}
             onChange={(e) => setContext(e.target.value)}
             rows={2}
-            placeholder="相关文件、约束和明确不做的事"
+            placeholder={tr('相关文件、约束和明确不做的事')}
           />
         </label>
         <div className="form-row">
           <label>
-            父任务
+            {tr('父任务')}
             <input
               type="number"
               min={1}
               value={parent}
               onChange={(e) => setParent(e.target.value)}
-              placeholder="任务 ID（可选）"
+              placeholder={tr('任务 ID（可选）')}
             />
           </label>
           <label>
-            依赖任务
+            {tr('依赖任务')}
             <input
               value={deps}
               onChange={(e) => setDeps(e.target.value)}
-              placeholder="ID，以逗号分隔"
+              placeholder={tr('ID，以逗号分隔')}
             />
           </label>
         </div>
         <div className="form-row">
           <label className="checkbox-label">
             <input type="checkbox" checked={draft} onChange={(e) => setDraft(e.target.checked)} />
-            保存为草稿
+            {tr('保存为草稿')}
           </label>
           <label className="checkbox-label">
             <input
@@ -230,17 +240,17 @@ export function NewTask({ onClose }: { onClose: () => void }) {
               disabled={['implement', 'bug'].includes(type)}
               onChange={(e) => setWrites(e.target.checked)}
             />
-            需要修改代码
+            {tr('需要修改代码')}
           </label>
         </div>
         <ErrorNotice error={error} />
         <div className="form-actions">
           <button type="button" className="button" onClick={onClose}>
-            取消
+            {tr('取消')}
           </button>
           <button className="button primary" disabled={action.isPending}>
             <Plus size={16} />
-            {action.isPending ? '创建中…' : '创建任务'}
+            {action.isPending ? tr('创建中…') : tr('创建任务')}
           </button>
         </div>
       </form>
@@ -256,6 +266,7 @@ export function TaskCard({
   draggable?: boolean;
   grouped?: boolean;
 }) {
+  const tr = useI18n();
   const { openTask } = useBoard();
   const drag = useDraggable({
     id: task.id,
@@ -265,6 +276,8 @@ export function TaskCard({
     <article
       ref={drag.setNodeRef}
       className={`task-card ${drag.isDragging ? 'dragging' : ''}`}
+      data-priority={task.priority}
+      data-frozen={task.frozen || undefined}
       style={
         drag.transform
           ? { transform: `translate3d(${drag.transform.x}px,${drag.transform.y}px,0)`, zIndex: 10 }
@@ -277,7 +290,7 @@ export function TaskCard({
         {draggable && transitions[task.status].length > 0 && (
           <button
             className="drag-handle"
-            aria-label={`拖动 T-${task.id}`}
+            aria-label={tr('拖动 T-{0}', task.id)}
             {...drag.listeners}
             {...drag.attributes}
           >
@@ -287,7 +300,7 @@ export function TaskCard({
       </div>
       {grouped && task.parent_id && (
         <button className="parent-link" onClick={() => openTask(task.parent_id!)}>
-          ↳ 父任务 T-{task.parent_id}
+          {tr('↳ 父任务 T-{0}', task.parent_id)}
         </button>
       )}
       <button className="task-title" onClick={() => openTask(task.id)}>
@@ -299,14 +312,14 @@ export function TaskCard({
         </div>
       )}
       <div className="task-card-tags">
-        <span className="tag">{typeNames[task.type]}</span>
+        <span className="tag">{tr(typeNames[task.type])}</span>
         {task.writes_code && (
-          <span title="需要写入锁">
+          <span title={tr('需要写入锁')}>
             <LockKeyhole size={12} />
           </span>
         )}
-        {task.frozen && <Snowflake size={13} aria-label="已冻结" />}
-        {task.attempt > 0 && <span className="attempt">返工 {task.attempt}</span>}
+        {task.frozen && <Snowflake size={13} aria-label={tr('已冻结')} />}
+        {task.attempt > 0 && <span className="attempt">{tr('返工 {0}', task.attempt)}</span>}
       </div>
       <div className="task-card-bottom">
         {task.assignee ? (
@@ -315,7 +328,9 @@ export function TaskCard({
             {task.assignee}
           </span>
         ) : (
-          <span className="muted">等待{task.role_hint ? ` ${task.role_hint}` : '认领'}</span>
+          <span className="muted">
+            {tr('等待{0}', task.role_hint ? ` ${task.role_hint}` : tr('认领'))}
+          </span>
         )}
         <span className="muted small">{time(task.updated_at)}</span>
       </div>
@@ -331,18 +346,25 @@ function Column({
   children: ReactNode;
   count: number;
 }) {
+  const tr = useI18n();
   const drop = useDroppable({ id: status });
   return (
-    <section ref={drop.setNodeRef} className={`kanban-column ${drop.isOver ? 'drag-over' : ''}`}>
+    <section
+      ref={drop.setNodeRef}
+      className={`kanban-column ${drop.isOver ? 'drag-over' : ''} ${count ? '' : 'empty'}`}
+      data-status={status}
+      aria-label={tr('{0} · {1} 项', tr(statusNames[status]), count)}
+    >
       <div className="column-title">
         <Badge status={status} />
-        <span>{count}</span>
+        <span className="column-count">{count}</span>
       </div>
       <div className="column-cards">{children}</div>
     </section>
   );
 }
 export function TaskBoard() {
+  const tr = useI18n();
   const { me, participants, openTask, repositories } = useBoard();
   const [repository, setRepository] = useState('');
   const [assignee, setAssignee] = useState('');
@@ -372,14 +394,14 @@ export function TaskBoard() {
       <div className="toolbar">
         <div className="toolbar-filters">
           <select
-            aria-label="筛选仓库"
+            aria-label={tr('筛选仓库')}
             value={repository}
             onChange={(e) => {
               setRepository(e.target.value);
               setPage(0);
             }}
           >
-            <option value="">全部仓库</option>
+            <option value="">{tr('全部仓库')}</option>
             {repositories.map((r) => (
               <option key={r} value={r}>
                 {r}
@@ -387,14 +409,14 @@ export function TaskBoard() {
             ))}
           </select>
           <select
-            aria-label="筛选负责人"
+            aria-label={tr('筛选负责人')}
             value={assignee}
             onChange={(e) => {
               setAssignee(e.target.value);
               setPage(0);
             }}
           >
-            <option value="">全部负责人</option>
+            <option value="">{tr('全部负责人')}</option>
             {participants.map((p) => (
               <option key={p.handle} value={p.handle}>
                 @{p.handle}
@@ -402,7 +424,7 @@ export function TaskBoard() {
             ))}
           </select>
           <input
-            aria-label="筛选父任务"
+            aria-label={tr('筛选父任务')}
             type="number"
             min={1}
             value={parent}
@@ -410,7 +432,7 @@ export function TaskBoard() {
               setParent(e.target.value);
               setPage(0);
             }}
-            placeholder="父任务 ID"
+            placeholder={tr('父任务 ID')}
           />
           <label className="checkbox-label">
             <input
@@ -418,7 +440,7 @@ export function TaskBoard() {
               checked={grouped}
               onChange={(e) => setGrouped(e.target.checked)}
             />
-            按父任务分组
+            {tr('按父任务分组')}
           </label>
           <label className="checkbox-label">
             <input
@@ -429,13 +451,13 @@ export function TaskBoard() {
                 setPage(0);
               }}
             />
-            显示已结束
+            {tr('显示已结束')}
           </label>
         </div>
-        <span className="muted small">拖动卡片调整状态</span>
+        <span className="toolbar-hint">{tr('拖动卡片调整状态')}</span>
       </div>
       <ErrorNotice error={tasks.error ?? action.error} />
-      {notice && <div className="info-notice">{notice}</div>}
+      {notice && <div className="info-notice">{tr(notice)}</div>}
       <DndContext
         sensors={sensors}
         onDragEnd={(event) => {
@@ -451,7 +473,7 @@ export function TaskBoard() {
           setNotice('');
           action.mutate({
             operation: 'transition_task',
-            input: { id: task.id, status, reason: '通过看板调整任务状态' },
+            input: { id: task.id, status, reason: tr('通过看板调整任务状态') },
           });
         }}
       >
@@ -478,10 +500,10 @@ export function TaskBoard() {
                         {parentId ? (
                           <button className="group-heading" onClick={() => openTask(parentId)}>
                             T-{parentId} ·{' '}
-                            {tasks.data?.find((t) => t.id === parentId)?.title ?? '父任务'}
+                            {tasks.data?.find((t) => t.id === parentId)?.title ?? tr('父任务')}
                           </button>
                         ) : (
-                          <h3 className="group-heading">独立任务</h3>
+                          <h3 className="group-heading">{tr('独立任务')}</h3>
                         )}
                         {items
                           .filter((t) => groupFor(t) === parentId)
@@ -493,7 +515,7 @@ export function TaskBoard() {
                   : items.map((task) => (
                       <TaskCard key={task.id} task={task} draggable={me.kind === 'human'} />
                     ))}
-                {!items.length && <p className="column-empty">暂无任务</p>}
+                {!items.length && <p className="column-empty">{tr('暂无任务')}</p>}
               </Column>
             );
           })}
@@ -502,11 +524,11 @@ export function TaskBoard() {
       {((tasks.data?.length ?? 0) === 200 || page > 0) && (
         <div className="pagination">
           <button disabled={page === 0} onClick={() => setPage(page - 1)}>
-            上一页
+            {tr('上一页')}
           </button>
-          <span>第 {page + 1} 页 · 每页 200 个任务</span>
+          <span>{tr('第 {0} 页 · 每页 200 个任务', page + 1)}</span>
           <button disabled={(tasks.data?.length ?? 0) < 200} onClick={() => setPage(page + 1)}>
-            下一页
+            {tr('下一页')}
           </button>
         </div>
       )}
@@ -514,6 +536,7 @@ export function TaskBoard() {
   );
 }
 export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
+  const tr = useI18n();
   const task = useData<Task>('get_task', { id });
   const settings = useData<Settings>('get_settings');
   const approvals = useData<Approval[]>('list_approvals');
@@ -538,7 +561,7 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
         input: {
           id,
           status,
-          reason: reason.trim() || `人工确认：${statusNames[status]}`,
+          reason: reason.trim() || tr('人工确认：{0}', tr(statusNames[status])),
           artifacts:
             status === 'in_review' && t?.writes_code ? [{ kind: 'commit', ref: commit }] : [],
         },
@@ -546,7 +569,7 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
       { onSuccess: () => setTarget(undefined) },
     );
   return (
-    <Dialog title={`T-${id} · 任务详情`} onClose={onClose} wide>
+    <Dialog title={tr('T-{0} · 任务详情', id)} onClose={onClose} wide>
       <ErrorNotice error={task.error ?? action.error} />
       {t ? (
         <>
@@ -555,10 +578,10 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
               <div className="inline">
                 <Badge status={t.status} />
                 <span className={`priority priority-${t.priority}`}>{t.priority}</span>
-                <span className="tag">{typeNames[t.type]}</span>
-                {t.frozen && <span className="tag danger">已冻结</span>}
+                <span className="tag">{tr(typeNames[t.type])}</span>
+                {t.frozen && <span className="tag danger">{tr('已冻结')}</span>}
                 {t.plan_approved_at && (
-                  <span className="tag">计划已批准 · @{t.plan_approved_by}</span>
+                  <span className="tag">{tr('计划已批准 · @{0}', t.plan_approved_by)}</span>
                 )}
               </div>
               {me.kind === 'human' && transitions[t.status].includes('cancelled') && (
@@ -568,27 +591,27 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                   onClick={() => setCancelling(true)}
                 >
                   <Ban size={15} />
-                  取消任务
+                  {tr('取消任务')}
                 </button>
               )}
             </div>
             <h1>{t.title}</h1>
             <div className="detail-meta">
-              <span>创建者 @{t.creator}</span>
-              <span>负责人 {t.assignee ? `@${t.assignee}` : '待认领'}</span>
-              <span>{t.writes_code ? '需要写入锁' : '只读任务'}</span>
-              <span>返工 {t.attempt} 次</span>
+              <span>{tr('创建者 @{0}', t.creator)}</span>
+              <span>{tr('负责人 {0}', t.assignee ? `@${t.assignee}` : tr('待认领'))}</span>
+              <span>{t.writes_code ? tr('需要写入锁') : tr('只读任务')}</span>
+              <span>{tr('返工 {0} 次', t.attempt)}</span>
             </div>
           </div>
           <div className="detail-grid">
             <div>
               <section className="detail-section">
-                <h3>任务描述</h3>
-                <Markdown>{t.description || '暂无描述'}</Markdown>
+                <h3>{tr('任务描述')}</h3>
+                <Markdown>{t.description || tr('暂无描述')}</Markdown>
               </section>
               <section className="detail-section">
                 <h3>
-                  验收标准{' '}
+                  {tr('验收标准')}{' '}
                   <span className="muted">
                     {t.acceptance_criteria.filter((c) => c.checked).length}/
                     {t.acceptance_criteria.length}
@@ -618,12 +641,12 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                     </label>
                   ))
                 ) : (
-                  <p className="muted">未设置验收标准</p>
+                  <p className="muted">{tr('未设置验收标准')}</p>
                 )}
               </section>
               {Object.keys(t.context).length > 0 && (
                 <section className="detail-section">
-                  <h3>交接上下文</h3>
+                  <h3>{tr('交接上下文')}</h3>
                   {Object.entries(t.context).map(([key, value]) => (
                     <div key={key}>
                       <span className="muted small">{key}</span>
@@ -636,7 +659,8 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
               )}
               <section className="detail-section">
                 <h3>
-                  产物 <span className="muted">{t.artifacts.length}</span>
+                  {tr('产物')}
+                  <span className="muted">{t.artifacts.length}</span>
                 </h3>
                 {t.artifacts.length ? (
                   t.artifacts.map((a) => (
@@ -654,26 +678,26 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                     </div>
                   ))
                 ) : (
-                  <p className="muted">提交后，commit、报告和链接会显示在这里。</p>
+                  <p className="muted">{tr('提交后，commit、报告和链接会显示在这里。')}</p>
                 )}
               </section>
             </div>
             <aside>
               <section className="detail-section">
-                <h3>目标仓库</h3>
+                <h3>{tr('目标仓库')}</h3>
                 <p className="repository-path">
                   {t.repository ??
                     (t.writes_code
-                      ? '尚未选择，开工前请编辑任务补充。'
-                      : '未指定，可用于跨仓库规划。')}
+                      ? tr('尚未选择，开工前请编辑任务补充。')
+                      : tr('未指定，可用于跨仓库规划。'))}
                 </p>
               </section>
               <section className="detail-section">
-                <h3>关联任务</h3>
+                <h3>{tr('关联任务')}</h3>
                 {t.workflow_plan && (
                   <>
                     <p className="muted small">
-                      批准计划后，以下任务可按依赖自动推进。新增范围需另建计划。
+                      {tr('批准计划后，以下任务可按依赖自动推进。新增范围需另建计划。')}
                     </p>
                     <ErrorNotice error={children.error} />
                     <div className="dependency-list">
@@ -683,7 +707,7 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                           key={child.id}
                           onClick={() => openTask(child.id)}
                         >
-                          T-{child.id} · {child.title} · {statusNames[child.status]}
+                          T-{child.id} · {child.title} · {tr(statusNames[child.status])}
                         </button>
                       ))}
                     </div>
@@ -693,13 +717,13 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                           disabled={childPage === 0}
                           onClick={() => setChildPage(childPage - 1)}
                         >
-                          上一页
+                          {tr('上一页')}
                         </button>
                         <button
                           disabled={children.data?.length !== 200}
                           onClick={() => setChildPage(childPage + 1)}
                         >
-                          下一页
+                          {tr('下一页')}
                         </button>
                       </div>
                     )}
@@ -707,29 +731,31 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                 )}
                 {t.parent_id && (
                   <button className="text-button" onClick={() => openTask(t.parent_id!)}>
-                    父任务 T-{t.parent_id}
+                    {tr('父任务 T-{0}', t.parent_id)}
                   </button>
                 )}
                 <div className="dependency-list">
                   {t.depends_on.map((dep) => (
                     <button className="tag" key={dep} onClick={() => openTask(dep)}>
-                      依赖 T-{dep}
+                      {tr('依赖 T-{0}', dep)}
                     </button>
                   ))}
                 </div>
-                {!t.parent_id && !t.depends_on.length && <p className="muted">无依赖</p>}
+                {!t.parent_id && !t.depends_on.length && <p className="muted">{tr('无依赖')}</p>}
               </section>
               {t.lease_until && (
                 <section className="detail-section">
-                  <h3>认领租约</h3>
+                  <h3>{tr('认领租约')}</h3>
                   <p className={t.lease_expired_at ? 'danger' : 'muted'}>
-                    {t.lease_expired_at ? '已过期，写入锁仍保留' : `到期 ${time(t.lease_until)}`}
+                    {t.lease_expired_at
+                      ? tr('已过期，写入锁仍保留')
+                      : tr('到期 {0}', time(t.lease_until))}
                   </p>
                 </section>
               )}
               {t.labels.length > 0 && (
                 <section className="detail-section">
-                  <h3>标签</h3>
+                  <h3>{tr('标签')}</h3>
                   {t.labels.map((label) => (
                     <span className="tag" key={label}>
                       {label}
@@ -739,12 +765,12 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
               )}
               {me.kind === 'human' && (
                 <section className="human-controls">
-                  <h3>人工操作</h3>
+                  <h3>{tr('人工操作')}</h3>
                   {approvals.data
                     ?.filter((a) => a.task_id === id)
                     .map((a) => (
                       <div className="approval-inline" key={a.id}>
-                        <strong>申请：{statusNames[a.to_status]}</strong>
+                        <strong>{tr('申请：{0}', tr(statusNames[a.to_status]))}</strong>
                         <p>{a.reason}</p>
                         <button
                           className="button primary"
@@ -755,10 +781,10 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                           }}
                         >
                           {t.type === 'plan' && a.to_status === 'open'
-                            ? '批准计划'
+                            ? tr('批准计划')
                             : t.type === 'merge' && a.to_status === 'open'
-                              ? '批准合入'
-                              : '批准'}
+                              ? tr('批准合入')
+                              : tr('批准')}
                         </button>
                         <button
                           className="button subtle"
@@ -770,10 +796,13 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                             })
                           }
                         >
-                          驳回
+                          {tr('驳回')}
                         </button>
                       </div>
                     ))}
+                  {['done', 'cancelled'].includes(t.status) && (
+                    <p className="muted small">{tr('任务已结束，历史记录会完整保留。')}</p>
+                  )}
                   {!['done', 'cancelled'].includes(t.status) && (
                     <>
                       {t.workflow_plan &&
@@ -784,36 +813,36 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                             disabled={action.isPending}
                             onClick={() => perform('open')}
                           >
-                            批准计划
+                            {tr('批准计划')}
                           </button>
                         )}
                       <label>
-                        操作说明
+                        {tr('操作说明')}
                         <textarea
-                          aria-label="人工操作说明"
+                          aria-label={tr('人工操作说明')}
                           value={reason}
                           onChange={(e) => setReason(e.target.value)}
                           rows={3}
-                          placeholder="说明审批、驳回或调整的原因"
+                          placeholder={tr('说明审批、驳回或调整的原因')}
                         />
                       </label>
                       {!t.workflow_plan && (
                         <>
                           <label>
-                            调整状态
+                            {tr('调整状态')}
                             <select
-                              aria-label="调整任务状态"
+                              aria-label={tr('调整任务状态')}
                               value={target ?? ''}
                               onChange={(e) => setTarget(e.target.value as TaskStatus)}
                             >
-                              <option value="">选择下一状态</option>
+                              <option value="">{tr('选择下一状态')}</option>
                               {transitions[t.status]
                                 .filter((s) => s !== 'cancelled')
                                 .map((s) => (
                                   <option key={s} value={s}>
-                                    {statusNames[s]}
+                                    {tr(statusNames[s])}
                                     {settings.data && isGated(settings.data, t.status, s, t.type)
-                                      ? ' · 人工审批'
+                                      ? tr(' · 人工审批')
                                       : ''}
                                   </option>
                                 ))}
@@ -821,12 +850,12 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                           </label>
                           {target === 'in_review' && t.writes_code && (
                             <label>
-                              当前 commit SHA
+                              {tr('当前 commit SHA')}
                               <input
-                                aria-label="当前 commit SHA"
+                                aria-label={tr('当前 commit SHA')}
                                 value={commit}
                                 onChange={(e) => setCommit(e.target.value)}
-                                placeholder="完整 commit SHA"
+                                placeholder={tr('完整 commit SHA')}
                                 required
                               />
                             </label>
@@ -838,12 +867,12 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                               if (target) perform(target);
                             }}
                           >
-                            确认调整
+                            {tr('确认调整')}
                           </button>
                           <label>
-                            负责人
+                            {tr('负责人')}
                             <select
-                              aria-label="改派负责人"
+                              aria-label={tr('改派负责人')}
                               value={t.assignee ?? ''}
                               disabled={
                                 action.isPending || ['draft', 'in_review'].includes(t.status)
@@ -855,7 +884,7 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                                 })
                               }
                             >
-                              <option value="">待认领</option>
+                              <option value="">{tr('待认领')}</option>
                               {participants.map((p) => (
                                 <option key={p.handle} value={p.handle}>
                                   @{p.handle}
@@ -866,9 +895,9 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                         </>
                       )}
                       <label>
-                        优先级
+                        {tr('优先级')}
                         <select
-                          aria-label="修改优先级"
+                          aria-label={tr('修改优先级')}
                           value={t.priority}
                           disabled={action.isPending}
                           onChange={(e) =>
@@ -894,11 +923,11 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                         }
                       >
                         <Snowflake size={15} />
-                        {t.frozen ? '恢复任务' : '冻结任务'}
+                        {t.frozen ? tr('恢复任务') : tr('冻结任务')}
                       </button>
                       {t.plan_approved_at && (
                         <p className="muted small">
-                          计划范围已批准。新增或变更范围请创建后续计划。
+                          {tr('计划范围已批准。新增或变更范围请创建后续计划。')}
                         </p>
                       )}
                       <button
@@ -906,7 +935,7 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                         disabled={Boolean(t.plan_approved_at)}
                         onClick={() => setEditing(true)}
                       >
-                        编辑任务与依赖
+                        {tr('编辑任务与依赖')}
                       </button>
                     </>
                   )}
@@ -915,7 +944,7 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
             </aside>
           </div>
           <section className="detail-section">
-            <h3>统一时间线</h3>
+            <h3>{tr('统一时间线')}</h3>
             <Composer destination={{ task_id: id }} />
             <EventList taskId={id} />
           </section>
@@ -923,13 +952,14 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
           {cancelling && <CancelTask task={t} onClose={() => setCancelling(false)} />}
         </>
       ) : (
-        !task.error && <Empty title="正在读取任务…" />
+        !task.error && <Empty title={tr('正在读取任务…')} />
       )}
     </Dialog>
   );
 }
 
 function CancelTask({ task, onClose }: { task: Task; onClose: () => void }) {
+  const tr = useI18n();
   const [reason, setReason] = useState('');
   const action = useAction();
   const canCancel = transitions[task.status].includes('cancelled');
@@ -945,24 +975,29 @@ function CancelTask({ task, onClose }: { task: Task; onClose: () => void }) {
     );
   };
   return (
-    <Dialog title={`取消任务 T-${task.id}`} onClose={onClose}>
+    <Dialog title={tr('取消任务 T-{0}', task.id)} onClose={onClose}>
       <form className="form-stack" onSubmit={submit}>
-        <p>取消「{task.title}」后会保留历史记录，任务不能重新开启。相关任务不会一并取消。</p>
+        <p>
+          {tr('取消「{0}」后会保留历史记录，任务不能重新开启。相关任务不会一并取消。', task.title)}
+        </p>
         {task.assignee && (
           <p className="muted">
-            请先确认 @{task.assignee} 已停止执行。
-            {task.writes_code && '取消会释放该任务持有的写入锁，不会修改仓库文件。'}
+            {tr(
+              '请先确认 @{0} 已停止执行。{1}',
+              task.assignee,
+              task.writes_code && tr('取消会释放该任务持有的写入锁，不会修改仓库文件。'),
+            )}
           </p>
         )}
         <ErrorNotice error={action.error} />
-        {!canCancel && <p className="muted">任务已经结束，无需再次取消。</p>}
+        {!canCancel && <p className="muted">{tr('任务已经结束，无需再次取消。')}</p>}
         <label>
-          取消原因
+          {tr('取消原因')}
           <textarea
-            aria-label="取消原因"
+            aria-label={tr('取消原因')}
             value={reason}
             onChange={(event) => setReason(event.target.value)}
-            placeholder="例如：原计划已调整，取消后重新创建任务"
+            placeholder={tr('例如：原计划已调整，取消后重新创建任务')}
             rows={3}
             maxLength={20000}
             disabled={action.isPending || !canCancel}
@@ -972,14 +1007,14 @@ function CancelTask({ task, onClose }: { task: Task; onClose: () => void }) {
         </label>
         <div className="form-actions">
           <button className="button" type="button" onClick={onClose}>
-            返回
+            {tr('返回')}
           </button>
           <button
             className="button danger"
             type="submit"
             disabled={action.isPending || !canCancel || !reason.trim()}
           >
-            {action.isPending ? '正在取消…' : '确认取消任务'}
+            {action.isPending ? tr('正在取消…') : tr('确认取消任务')}
           </button>
         </div>
       </form>
@@ -987,6 +1022,7 @@ function CancelTask({ task, onClose }: { task: Task; onClose: () => void }) {
   );
 }
 function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
+  const tr = useI18n();
   const { repositories } = useBoard();
   const [repository, setRepository] = useState(task.repository ?? '');
   const [title, setTitle] = useState(task.title);
@@ -995,7 +1031,7 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
   const [dependencies, setDependencies] = useState(task.depends_on.join(', '));
   const action = useAction();
   return (
-    <Dialog title="编辑任务" onClose={onClose}>
+    <Dialog title={tr('编辑任务')} onClose={onClose}>
       <form
         className="form-stack"
         onSubmit={async (e) => {
@@ -1036,15 +1072,16 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
         }}
       >
         <label>
-          名称
+          {tr('名称')}
           <input value={title} onChange={(e) => setTitle(e.target.value)} required />
         </label>
         <label>
-          描述
+          {tr('描述')}
           <textarea rows={5} value={description} onChange={(e) => setDescription(e.target.value)} />
         </label>
         <label>
-          仓库路径<span className="label-hint">开工后不可切换仓库</span>
+          {tr('仓库路径')}
+          <span className="label-hint">{tr('开工后不可切换仓库')}</span>
           <input
             value={repository}
             onChange={(e) => setRepository(e.target.value)}
@@ -1064,13 +1101,14 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
           </datalist>
         </label>
         <label>
-          验收标准<span className="label-hint">修改标准会重置勾选状态</span>
+          {tr('验收标准')}
+          <span className="label-hint">{tr('修改标准会重置勾选状态')}</span>
           <textarea rows={4} value={criteria} onChange={(e) => setCriteria(e.target.value)} />
         </label>
         <label>
-          依赖任务
+          {tr('依赖任务')}
           <span className="label-hint">
-            输入任务 ID，以逗号分隔。前置任务取消后，可在这里移除或替换。
+            {tr('输入任务 ID，以逗号分隔。前置任务取消后，可在这里移除或替换。')}
           </span>
           <input
             value={dependencies}
@@ -1080,7 +1118,7 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
         </label>
         <ErrorNotice error={action.error} />
         <button className="button primary" disabled={action.isPending}>
-          保存
+          {tr('保存')}
         </button>
       </form>
     </Dialog>

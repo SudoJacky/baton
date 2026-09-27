@@ -115,6 +115,7 @@ export const schemas = {
     .strict(),
   leave: z.object({}).strict(),
   whoami: z.object({}).strict(),
+  update_profile: z.object({ display_name: z.string().trim().max(80) }).strict(),
   set_status: z
     .object({
       status: z.enum(['online', 'waiting', 'offline']),
@@ -421,6 +422,12 @@ export const operations: Record<Operation, Route> = {
     path: '/whoami',
     description:
       'Confirm your authenticated handle, role, assigned tasks and unread mentions before acting.',
+  },
+  update_profile: {
+    method: 'PATCH',
+    path: '/profile',
+    human: true,
+    description: 'Set your own display name. An empty name clears the personal greeting.',
   },
   set_status: {
     method: 'POST',

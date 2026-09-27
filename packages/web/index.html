@@ -3,7 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f5f5f2" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f5f2ea" />
+    <script>
+      (() => {
+        let saved = {};
+        try {
+          saved = JSON.parse(localStorage.getItem('baton-preferences') || '{}') || {};
+        } catch (error) {
+          console.error('Cannot read Baton appearance preferences.', error);
+        }
+        const theme = ['light', 'dark'].includes(saved.theme)
+          ? saved.theme
+          : matchMedia('(prefers-color-scheme: dark)').matches
+            ? 'dark'
+            : 'light';
+        const language = ['zh-CN', 'en'].includes(saved.language)
+          ? saved.language
+          : navigator.language.startsWith('zh')
+            ? 'zh-CN'
+            : 'en';
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.lang = language;
+        document.querySelector('meta[name="theme-color"]').content =
+          theme === 'dark' ? '#161714' : '#f5f2ea';
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Baton · Agent Board</title>
   </head>

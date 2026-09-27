@@ -151,6 +151,7 @@ const commands: Record<Operation, string> = {
   join: 'join',
   leave: 'leave',
   whoami: 'whoami',
+  update_profile: 'profile set',
   set_status: 'status',
   list_participants: 'participant list',
   freeze_participant: 'participant freeze',
@@ -309,9 +310,7 @@ program
         tester: { role: 'tester' },
       },
       humans: {
-        [human]: {
-          display_name: human,
-        },
+        [human]: {},
       },
     };
     const { configSchema } = await import('@baton/shared');
