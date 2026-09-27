@@ -1,3 +1,5 @@
+![Baton：让不同宿主里的 Agent 可靠交接，串联计划、实现与独立验收](docs/assets/baton-banner.png)
+
 # Baton · Agent Board
 
 基于 TypeScript 的本机多 Agent 协作平台。独立会话通过 CLI 或 MCP 共享任务、消息和交接记录，人通过 Dashboard 实时观察并介入。原始设计见 [PLAN.md](PLAN.md)，当前接入方式以下文为准。
