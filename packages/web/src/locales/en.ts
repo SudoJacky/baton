@@ -364,8 +364,9 @@ export const english: Record<string, string> = {
   恢复默认: 'Reset defaults',
   已复制: 'Copied',
   复制参数: 'Copy settings',
-  切换到亮色: 'Switch to light mode',
-  切换到暗色: 'Switch to dark mode',
+  界面主题: 'Theme',
+  亮色: 'Light',
+  暗色: 'Dark',
   界面语言: 'Language',
   界面设置: 'Appearance',
   '无法保存界面设置，请检查浏览器存储权限。':

@@ -1,10 +1,12 @@
 import { useI18n, locale } from './i18n.js';
-import { setPreferences, usePreferences, type Preferences, type Language } from './preferences.js';
+import { setPreferences, usePreferences, type Preferences } from './preferences.js';
 import {
+  useId,
   useMemo,
   useRef,
   useState,
   useEffect,
+  useLayoutEffect,
   type ReactNode,
 } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -255,6 +257,7 @@ export function App() {
             ))}
           </nav>
           <div className="sidebar-bottom">
+            <AppearanceControls />
             <button
               className="profile"
               aria-label={tr('修改昵称')}
@@ -290,7 +293,6 @@ export function App() {
                     : tr('正在连接')}
               </div>
             )}
-            <AppearanceControls />
           </div>
           <div className="page">
             <header className="page-header">
@@ -332,6 +334,88 @@ export function App() {
     </BoardContext.Provider>
   );
 }
+function PreferenceToggle<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: readonly [
+    { value: T; label: string; content: ReactNode; lang?: string },
+    { value: T; label: string; content: ReactNode; lang?: string },
+  ];
+  onChange: (value: T) => void;
+}) {
+  const name = useId();
+  const track = useRef<HTMLDivElement>(null);
+  const selected = options[1].value === value ? 1 : 0;
+  const motion = useRef({ position: selected, velocity: 0 });
+  useLayoutEffect(() => {
+    const element = track.current!;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let frame = 0;
+    let last = performance.now();
+    const paint = () => {
+      element.style.setProperty('--toggle-position', `${motion.current.position * 100}%`);
+      element.style.setProperty(
+        '--toggle-stretch',
+        String(1 + Math.min(Math.abs(motion.current.velocity) * 0.06, 0.32)),
+      );
+    };
+    const settle = () => {
+      cancelAnimationFrame(frame);
+      motion.current = { position: selected, velocity: 0 };
+      paint();
+    };
+    const tick = (now: number) => {
+      const dt = Math.min((now - last) / 1000, 1 / 30);
+      last = now;
+      const state = motion.current;
+      state.velocity += ((selected - state.position) * 500 - state.velocity * 30) * dt;
+      state.position += state.velocity * dt;
+      if (Math.abs(selected - state.position) < 0.001 && Math.abs(state.velocity) < 0.01) {
+        settle();
+        return;
+      }
+      paint();
+      frame = requestAnimationFrame(tick);
+    };
+    const onMotionChange = () => {
+      if (reducedMotion.matches) settle();
+    };
+    // Keep position and velocity when the user reverses direction mid-flight.
+    paint();
+    if (reducedMotion.matches) settle();
+    else if (motion.current.position !== selected || motion.current.velocity)
+      frame = requestAnimationFrame(tick);
+    reducedMotion.addEventListener('change', onMotionChange);
+    return () => {
+      cancelAnimationFrame(frame);
+      reducedMotion.removeEventListener('change', onMotionChange);
+    };
+  }, [selected]);
+  return (
+    <div className="preference-toggle" role="radiogroup" aria-label={label} ref={track}>
+      <span className="preference-thumb" aria-hidden="true" />
+      {options.map((option) => (
+        <label className="preference-option" key={option.value} title={option.label}>
+          <input
+            className="sr-only"
+            type="radio"
+            name={name}
+            value={option.value}
+            checked={value === option.value}
+            aria-label={option.label}
+            onChange={() => onChange(option.value)}
+          />
+          <span lang={option.lang}>{option.content}</span>
+        </label>
+      ))}
+    </div>
+  );
+}
 function AppearanceControls() {
   const tr = useI18n();
   const { theme, language } = usePreferences();
@@ -345,31 +429,26 @@ function AppearanceControls() {
       setError(true);
     }
   };
-  const themeLabel = tr(theme === 'dark' ? '切换到亮色' : '切换到暗色');
   return (
     <div className="appearance-controls" role="group" aria-label={tr('界面设置')}>
-      <button
-        className="icon-button theme-toggle"
-        type="button"
-        aria-label={themeLabel}
-        title={themeLabel}
-        onClick={() => update({ theme: theme === 'dark' ? 'light' : 'dark' })}
-      >
-        {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
-      </button>
-      <select
-        className="language-select"
-        aria-label={tr('界面语言')}
+      <PreferenceToggle
+        label={tr('界面主题')}
+        value={theme}
+        options={[
+          { value: 'light', label: tr('亮色'), content: <Sun size={16} aria-hidden="true" /> },
+          { value: 'dark', label: tr('暗色'), content: <Moon size={16} aria-hidden="true" /> },
+        ]}
+        onChange={(theme) => update({ theme })}
+      />
+      <PreferenceToggle
+        label={tr('界面语言')}
         value={language}
-        onChange={(event) => update({ language: event.target.value as Language })}
-      >
-        <option value="zh-CN" lang="zh-CN">
-          中文
-        </option>
-        <option value="en" lang="en">
-          English
-        </option>
-      </select>
+        options={[
+          { value: 'zh-CN', label: '中文', content: '中文', lang: 'zh-CN' },
+          { value: 'en', label: 'English', content: 'EN', lang: 'en' },
+        ]}
+        onChange={(language) => update({ language })}
+      />
       {error && (
         <p className="appearance-error" role="alert">
           {tr('无法保存界面设置，请检查浏览器存储权限。')}
