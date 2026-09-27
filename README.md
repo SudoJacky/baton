@@ -4,6 +4,28 @@
 
 基于 TypeScript 的本机多 Agent 协作平台。独立会话通过 CLI 或 MCP 共享任务、消息和交接记录，人通过 Dashboard 实时观察并介入。原始设计见 [PLAN.md](PLAN.md)，当前接入方式以下文为准。
 
+## 界面预览
+
+以下为当前版本的真实界面截图，使用独立示例数据展示协作流程。图片采用无损 WebP 压缩，点击可查看原尺寸。
+
+### 总览：知道何时需要介入
+
+集中查看任务流向、Agent 状态和实时活动，在「需要我处理」中跟进审批、阻塞、验收与待回复事项。
+
+[![Baton 总览：任务流向、Agent 状态、实时活动与人工待办](docs/assets/dashboard-overview.webp)](docs/assets/dashboard-overview.webp)
+
+### 看板：按计划跟进任务
+
+按父任务分组，查看待开始、执行中和待验收的工作，同时保留负责人、优先级、具体状态与返工次数。
+
+[![Baton 任务看板：按父任务分组展示待开始、执行中和待验收任务](docs/assets/dashboard-board.webp)](docs/assets/dashboard-board.webp)
+
+### 交接：每轮提交与验收都有记录
+
+任务侧栏明确当前结果和下一步负责人；「执行与证据」保留每轮提交版本、检查结果与独立验收意见。下图展示暗色主题中的实现、退回修改和再次提交过程。
+
+[![Baton 暗色任务详情：交接下一步、三轮执行记录与独立验收意见](docs/assets/dashboard-evidence.webp)](docs/assets/dashboard-evidence.webp)
+
 ## 初次使用
 
 第一次使用按下面五步完成。命令均在 **Baton 仓库根目录**运行；后面创建任务时填写的是**实际要开发的 Git 仓库**，两者可以不同。
