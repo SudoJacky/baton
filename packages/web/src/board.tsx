@@ -3,6 +3,7 @@ import {
   Component,
   createContext,
   useContext,
+  useId,
   useEffect,
   useRef,
   useState,
@@ -115,7 +116,7 @@ export const ago = (value?: string | null) => {
 type BoardContextType = {
   api: BoardClient;
   me: Participant;
-  openTask: (id: number) => void;
+  openTask: (id: number, siblings?: number[]) => void;
   participants: Participant[];
   repositories: string[];
 };
@@ -275,6 +276,7 @@ export function Dialog({
   wide?: boolean;
 }) {
   const tr = useI18n();
+  const titleId = useId();
   const [dialog, setDialog] = useState<HTMLDialogElement | null>(null);
   useEffect(() => {
     if (!dialog) return;
@@ -287,14 +289,19 @@ export function Dialog({
     <dialog
       ref={setDialog}
       className={wide ? 'dialog glass wide' : 'dialog glass'}
-      onCancel={onClose}
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
       <div className="dialog-body">
         <header className="dialog-header">
-          <h2>{title}</h2>
+          <h2 id={titleId}>{title}</h2>
           <button className="icon-button" aria-label={tr('关闭')} onClick={onClose}>
             <X size={20} />
           </button>

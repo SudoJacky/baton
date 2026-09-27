@@ -125,6 +125,9 @@ export const schemas = {
   list_participants: z.object({}).strict(),
   list_tasks: z
     .object({
+      search: z.string().trim().max(240).optional(),
+      type: taskTypeSchema.optional(),
+      depends_on: idSchema.optional(),
       status: statusSchema.optional(),
       assignee: handleSchema.optional(),
       role_hint: z.string().optional(),
@@ -137,6 +140,17 @@ export const schemas = {
     })
     .strict(),
   get_task: z.object({ id: idSchema, include_thread: z.boolean().default(false) }).strict(),
+  list_task_runs: z
+    .object({ id: idSchema, limit, offset: z.number().int().min(0).default(0) })
+    .strict(),
+  get_attention_queue: z
+    .object({
+      kind: z.enum(['all', 'approval', 'blocker', 'review', 'question']).default('all'),
+      sort: z.enum(['priority', 'waiting', 'impact']).default('priority'),
+      limit,
+      offset: z.number().int().min(0).default(0),
+    })
+    .strict(),
   dispatch_task: z
     .object({ id: idSchema, handle: handleSchema, mode: z.enum(['implement', 'review']) })
     .strict(),
@@ -353,6 +367,19 @@ type Route = {
   human?: boolean;
 };
 export const operations: Record<Operation, Route> = {
+  list_task_runs: {
+    method: 'GET',
+    path: '/tasks/:id/runs',
+    description:
+      'Read execution and review rounds, their fixed commits, outcomes and captured evidence.',
+  },
+  get_attention_queue: {
+    method: 'GET',
+    path: '/attention',
+    human: true,
+    description:
+      'Read pending approvals, blockers, reviews and your unresolved questions, sorted before pagination.',
+  },
   dispatch_task: {
     method: 'POST',
     path: '/tasks/:id/dispatch',
@@ -712,6 +739,36 @@ export interface WorkerAssignment {
   evidence: Evidence[];
   handoff: Handoff;
   heartbeat_after_ms: number;
+}
+export interface TaskRun {
+  run_id: string;
+  mode: WorkerAssignment['mode'];
+  state: WorkerAssignment['state'];
+  handle: string;
+  coordinator: string;
+  commit_sha: string | null;
+  submitted_commit_sha: string | null;
+  created_at: string;
+  ended_at: string | null;
+  summary: string | null;
+  outcome: 'submitted' | 'approve' | 'changes_requested' | null;
+  evidence: Evidence[];
+}
+export interface AttentionItem {
+  id: string;
+  kind: 'approval' | 'blocker' | 'review' | 'question';
+  task: TaskSummary | null;
+  title: string;
+  reason: string;
+  since: string;
+  priority: string;
+  impact: number;
+  handoff: Handoff | null;
+  mention?: Mention;
+}
+export interface AttentionQueue {
+  items: AttentionItem[];
+  total: number;
 }
 export interface PreparedEvidence {
   run_id: string;

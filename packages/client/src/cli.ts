@@ -156,6 +156,8 @@ const commands: Record<Operation, string> = {
   list_participants: 'participant list',
   freeze_participant: 'participant freeze',
   list_tasks: 'task list',
+  list_task_runs: 'task runs',
+  get_attention_queue: 'attention',
   get_task: 'task get',
   create_task: 'task create',
   claim_task: 'task claim',

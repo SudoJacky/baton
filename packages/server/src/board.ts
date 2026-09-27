@@ -36,6 +36,9 @@ import {
   type Evidence,
   type Handoff,
   type PreparedEvidence,
+  type TaskRun,
+  type AttentionItem,
+  type AttentionQueue,
 } from '@baton/shared';
 import { Store } from './database.js';
 import { requireCondition as check } from './errors.js';
@@ -498,11 +501,24 @@ export class Board {
       ['role_hint', input.role_hint],
       ['parent_id', input.parent],
       ['repository', input.repository],
+      ['type', input.type],
     ] as const) {
       if (value !== undefined) {
         where.push(`${column}=?`);
         params.push(value);
       }
+    }
+    if (input.search) {
+      const query = input.search.replace(/[\\%_]/g, '\\$&');
+      where.push("(title LIKE ? ESCAPE '\\' OR id=?)");
+      params.push(
+        `%${query}%`,
+        /^(?:T-)?\d+$/i.test(input.search) ? Number(input.search.replace(/^T-/i, '')) : -1,
+      );
+    }
+    if (input.depends_on !== undefined) {
+      where.push('id IN (SELECT task_id FROM task_dependencies WHERE depends_on_id=?)');
+      params.push(input.depends_on);
     }
     return this.store
       .all<TaskRow>(
@@ -518,6 +534,157 @@ export class Board {
       "SELECT count(*) n FROM mentions WHERE handle=? AND state='unread'",
       handle,
     )!.n;
+  }
+  private taskRuns(p: Parsed<'list_task_runs'>): { items: TaskRun[]; total: number } {
+    this.task(p.id);
+    const rows = this.store.all<WorkerRun>(
+      'SELECT * FROM worker_runs WHERE task_id=? ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?',
+      p.id,
+      p.limit,
+      p.offset,
+    );
+    const items = rows.map((run): TaskRun => {
+      const end = this.store.get<EventRow>(
+        "SELECT * FROM events WHERE task_id=? AND json_extract(payload,'$.run_id')=? AND type IN ('worker.completed','worker.stopped','task.merge_conflict') ORDER BY id DESC LIMIT 1",
+        p.id,
+        run.id,
+      );
+      const payload = end ? (JSON.parse(end.payload) as Record<string, unknown>) : {};
+      const message = this.store.get<{ body: string }>(
+        "SELECT body FROM messages WHERE run_id=? AND task_id=? AND kind IN ('handoff','report','system') ORDER BY id DESC LIMIT 1",
+        run.id,
+        p.id,
+      );
+      return {
+        run_id: run.id,
+        mode: run.mode,
+        state: run.state,
+        handle: run.handle,
+        coordinator: run.coordinator,
+        commit_sha: run.commit_sha,
+        submitted_commit_sha: run.submitted_commit_sha,
+        created_at: run.created_at,
+        ended_at: end?.created_at ?? null,
+        summary:
+          typeof payload.summary === 'string'
+            ? payload.summary
+            : typeof payload.reason === 'string'
+              ? payload.reason
+              : (message?.body ?? null),
+        outcome:
+          payload.verdict === 'approve' || payload.verdict === 'changes_requested'
+            ? payload.verdict
+            : run.mode === 'implement' && run.state === 'completed'
+              ? 'submitted'
+              : null,
+        evidence: JSON.parse(run.evidence) as Evidence[],
+      };
+    });
+    return {
+      items,
+      total: this.store.get<{ n: number }>(
+        'SELECT count(*) n FROM worker_runs WHERE task_id=?',
+        p.id,
+      )!.n,
+    };
+  }
+  private attentionQueue(actor: Participant, p: Parsed<'get_attention_queue'>): AttentionQueue {
+    this.human(actor);
+    const rows = this.store.all<TaskRow>(
+      `SELECT * FROM tasks WHERE status NOT IN ('done','cancelled') AND
+      (status IN ('blocked','in_review') OR frozen=1 OR lease_expired_at IS NOT NULL OR
+       EXISTS(SELECT 1 FROM approvals a WHERE a.task_id=tasks.id AND a.state='pending'))`,
+    );
+    const impact = (id: number) =>
+      this.store.get<{ n: number }>(
+        `SELECT count(*) n FROM tasks WHERE status NOT IN ('done','cancelled') AND
+      (parent_id=? OR id IN (SELECT task_id FROM task_dependencies WHERE depends_on_id=?))`,
+        id,
+        id,
+      )!.n;
+    const items: AttentionItem[] = rows.map((row) => {
+      const task = this.task(row.id);
+      const handoff = this.handoff(task);
+      const approval = this.store.get<Approval>(
+        "SELECT * FROM approvals WHERE task_id=? AND state='pending' ORDER BY id LIMIT 1",
+        row.id,
+      );
+      const kind =
+        row.frozen || row.lease_expired_at || row.status === 'blocked'
+          ? 'blocker'
+          : approval
+            ? 'approval'
+            : 'review';
+      const event = this.store.get<EventRow>(
+        `SELECT * FROM events WHERE task_id=? AND (
+          (type='task.status_changed' AND json_extract(payload,'$.to')=?) OR
+          type IN ('worker.stopped','task.merge_conflict','task.frozen','task.lease_expired_locked') OR
+          (?=1 AND type='task.updated' AND json_extract(payload,'$.after.frozen')=1 AND json_extract(payload,'$.before.frozen')=0)
+        ) ORDER BY id DESC LIMIT 1`,
+        row.id,
+        row.status,
+        row.frozen,
+      );
+      const payload = event ? (JSON.parse(event.payload) as { reason?: string }) : {};
+      return {
+        id: `task-${row.id}`,
+        kind,
+        task: this.summary(row),
+        title: row.title,
+        reason:
+          kind === 'approval'
+            ? approval!.reason
+            : row.lease_expired_at
+              ? '任务租约已到期，请检查执行现场。'
+              : row.frozen
+                ? handoff.summary
+                : payload.reason || handoff.summary,
+        since:
+          kind === 'approval'
+            ? approval!.created_at
+            : (row.lease_expired_at ?? event?.created_at ?? row.created_at),
+        priority: row.priority,
+        impact: impact(row.id),
+        handoff,
+      };
+    });
+    const questions = this.store.all<Omit<Mention, 'message'>>(
+      `SELECT n.id,n.message_id,n.state,n.created_at FROM mentions n JOIN messages m ON m.id=n.message_id
+       WHERE n.handle=? AND n.state!='resolved' AND m.kind='question'
+       AND (m.task_id IS NULL OR EXISTS(SELECT 1 FROM tasks t WHERE t.id=m.task_id AND t.status NOT IN ('done','cancelled')))`,
+      actor.handle,
+    );
+    for (const question of questions) {
+      const message = this.store.get<Message>(
+        'SELECT m.*,c.name channel_name FROM messages m LEFT JOIN channels c ON c.id=m.channel_id WHERE m.id=?',
+        question.message_id,
+      )!;
+      const task = message.task_id ? this.task(message.task_id) : null;
+      items.push({
+        id: `question-${question.id}`,
+        kind: 'question',
+        task,
+        title: task?.title ?? message.channel_name ?? `@${message.author}`,
+        reason: message.body,
+        since: question.created_at,
+        priority: task?.priority ?? 'P2',
+        impact: task ? impact(task.id) : 0,
+        handoff: null,
+        mention: { ...question, message },
+      });
+    }
+    const filtered = items.filter((item) => p.kind === 'all' || item.kind === p.kind);
+    filtered.sort(
+      (a, b) =>
+        (p.sort === 'impact'
+          ? b.impact - a.impact
+          : p.sort === 'priority'
+            ? a.priority.localeCompare(b.priority)
+            : 0) ||
+        a.since.localeCompare(b.since) ||
+        a.id.localeCompare(b.id),
+    );
+    return { items: filtered.slice(p.offset, p.offset + p.limit), total: filtered.length };
   }
   private participants(): Participant[] {
     const statistics = this.store.all<{
@@ -1453,7 +1620,13 @@ export class Board {
       run_id,
     );
     this.store.run('DELETE FROM sessions WHERE id=?', run_id);
-    this.event(actor.handle, 'worker.completed', task.id, { run_id, evidence });
+    const receipt = input as { summary?: string; comments?: string; verdict?: string };
+    this.event(actor.handle, 'worker.completed', task.id, {
+      run_id,
+      evidence,
+      summary: receipt.summary ?? receipt.comments,
+      ...(receipt.verdict ? { verdict: receipt.verdict } : {}),
+    });
     return this.assignment(this.run(run_id));
   }
   private claim(actor: Participant, id: number): Task {
@@ -2606,6 +2779,10 @@ export class Board {
         }
         case 'list_tasks':
           return this.listTasks(actor, schemas.list_tasks.parse(parsed));
+        case 'list_task_runs':
+          return this.taskRuns(schemas.list_task_runs.parse(parsed));
+        case 'get_attention_queue':
+          return this.attentionQueue(actor, schemas.get_attention_queue.parse(parsed));
         case 'get_task': {
           const p = schemas.get_task.parse(parsed);
           const task = this.task(p.id);

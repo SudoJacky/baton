@@ -20,7 +20,6 @@ import {
   Ban,
 } from 'lucide-react';
 import {
-  statuses,
   transitions,
   taskTypes,
   isGated,
@@ -46,21 +45,32 @@ import {
   useData,
 } from './board.js';
 import { Composer } from './messages.js';
-import { Markdown } from './Markdown.js';
+import { TaskPicker, TaskReference } from './TaskPicker.js';
+import { TaskRuns } from './TaskRuns.js';
+import { InlineTaskText } from './InlineTaskText.js';
+import { actionNames, boardColumns, dropTargets } from './task-ui.js';
+const taskTabs = [
+  ['content', '任务内容'],
+  ['runs', '执行与证据'],
+  ['discussion', '讨论记录'],
+] as const;
 
-export function NewTask({ onClose }: { onClose: () => void }) {
+export function NewTask({ onClose, parentTask }: { onClose: () => void; parentTask?: Task }) {
   const tr = useI18n();
-  const [repository, setRepository] = useState('');
+  const [repository, setRepository] = useState(parentTask?.repository ?? '');
   const [title, setTitle] = useState('');
   const [type, setType] = useState('implement');
   const [description, setDescription] = useState('');
   const [criteria, setCriteria] = useState('');
-  const [context, setContext] = useState('');
+  const [context, setContext] = useState(
+    typeof parentTask?.context.handoff === 'string' ? parentTask.context.handoff : '',
+  );
   const [priority, setPriority] = useState('P2');
   const [role, setRole] = useState('implementer');
-  const [parent, setParent] = useState('');
-  const [deps, setDeps] = useState('');
-  const [draft, setDraft] = useState(false);
+  const [parent, setParent] = useState<number[]>(parentTask ? [parentTask.id] : []);
+  const [deps, setDeps] = useState<number[]>([]);
+  const [draft, setDraft] = useState(true);
+  const [detailed, setDetailed] = useState(false);
   const [writes, setWrites] = useState(false);
   const [error, setError] = useState<unknown>();
   const action = useAction();
@@ -75,21 +85,16 @@ export function NewTask({ onClose }: { onClose: () => void }) {
         description,
         priority,
         role_hint: role || undefined,
-        parent_id: parent ? Number(parent) : undefined,
+        parent_id: parent[0],
         repository: repository.trim() || undefined,
-        depends_on: deps
-          ? deps
-              .split(/[，,\s]+/)
-              .filter(Boolean)
-              .map(Number)
-          : [],
+        depends_on: deps,
         acceptance_criteria: criteria
           .split('\n')
           .map((s) => s.trim())
           .filter(Boolean),
         context: context ? { handoff: context } : {},
         writes_code: writes || ['implement', 'bug', 'merge'].includes(type),
-        draft,
+        draft: !detailed || draft,
       });
       const result = await action.mutateAsync({ operation: 'create_task', input });
       onClose();
@@ -148,101 +153,118 @@ export function NewTask({ onClose }: { onClose: () => void }) {
               ))}
             </select>
           </label>
-          <label>
-            {tr('优先级')}
-            <select value={priority} onChange={(e) => setPriority(e.target.value)}>
-              {['P0', 'P1', 'P2', 'P3'].map((p) => (
-                <option key={p}>{p}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            {tr('建议角色')}
-            <input
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              placeholder={tr('不限')}
-            />
-          </label>
+          {detailed && (
+            <>
+              <label>
+                {tr('优先级')}
+                <select value={priority} onChange={(e) => setPriority(e.target.value)}>
+                  {['P0', 'P1', 'P2', 'P3'].map((p) => (
+                    <option key={p}>{p}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                {tr('建议角色')}
+                <input
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                  placeholder={tr('不限')}
+                />
+              </label>
+            </>
+          )}
         </div>
-        <label>
-          {tr('仓库路径')}
-          <span className="label-hint">{tr('可稍后选择；代码任务开工前必须确定')}</span>
-          <input
-            value={repository}
-            onChange={(e) => setRepository(e.target.value)}
-            list="task-repositories"
-            placeholder={tr('服务所在机器上的 Git 仓库绝对路径')}
-          />
-          <datalist id="task-repositories">
-            {repositories.map((r) => (
-              <option key={r} value={r} />
-            ))}
-          </datalist>
-        </label>
-        <label>
-          {tr('描述')}
-          <textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={4}
-            placeholder={tr('目标、范围，以及为什么要做这件事…')}
-          />
-        </label>
-        <label>
-          {tr('验收标准')}
-          <span className="label-hint">{tr('每行一条')}</span>
-          <textarea
-            value={criteria}
-            onChange={(e) => setCriteria(e.target.value)}
-            rows={3}
-            placeholder={tr('完成后如何确认结果正确？')}
-          />
-        </label>
-        <label>
-          {tr('交接上下文')}
-          <textarea
-            value={context}
-            onChange={(e) => setContext(e.target.value)}
-            rows={2}
-            placeholder={tr('相关文件、约束和明确不做的事')}
-          />
-        </label>
-        <div className="form-row">
-          <label>
-            {tr('父任务')}
-            <input
-              type="number"
-              min={1}
+        {parentTask && (
+          <p className="muted small">
+            {tr('子任务属于 T-{0}，已继承仓库和交接上下文。', parentTask.id)}
+          </p>
+        )}
+        <button
+          type="button"
+          className="text-button"
+          aria-expanded={detailed}
+          onClick={() => setDetailed(!detailed)}
+        >
+          {detailed ? tr('收起任务信息') : tr('补充任务信息')}
+        </button>
+        {!detailed && (
+          <p className="muted small">{tr('先保存草稿，准备执行时再补充范围与验收标准。')}</p>
+        )}
+        {detailed && (
+          <>
+            <label>
+              {tr('仓库路径')}
+              <span className="label-hint">{tr('可稍后选择；代码任务开工前必须确定')}</span>
+              <input
+                value={repository}
+                onChange={(e) => setRepository(e.target.value)}
+                list="task-repositories"
+                placeholder={tr('服务所在机器上的 Git 仓库绝对路径')}
+              />
+              <datalist id="task-repositories">
+                {repositories.map((r) => (
+                  <option key={r} value={r} />
+                ))}
+              </datalist>
+            </label>
+            <label>
+              {tr('描述')}
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={4}
+                placeholder={tr('目标、范围，以及为什么要做这件事…')}
+              />
+            </label>
+            <label>
+              {tr('验收标准')}
+              <span className="label-hint">{tr('每行一条')}</span>
+              <textarea
+                value={criteria}
+                onChange={(e) => setCriteria(e.target.value)}
+                rows={3}
+                placeholder={tr('完成后如何确认结果正确？')}
+              />
+            </label>
+            <label>
+              {tr('交接上下文')}
+              <textarea
+                value={context}
+                onChange={(e) => setContext(e.target.value)}
+                rows={2}
+                placeholder={tr('相关文件、约束和明确不做的事')}
+              />
+            </label>
+            <TaskPicker
+              label={tr('父计划')}
               value={parent}
-              onChange={(e) => setParent(e.target.value)}
-              placeholder={tr('任务 ID（可选）')}
+              onChange={setParent}
+              single
+              plansOnly
+              disabled={Boolean(parentTask)}
             />
-          </label>
-          <label>
-            {tr('依赖任务')}
-            <input
-              value={deps}
-              onChange={(e) => setDeps(e.target.value)}
-              placeholder={tr('ID，以逗号分隔')}
-            />
-          </label>
-        </div>
-        <div className="form-row">
-          <label className="checkbox-label">
-            <input type="checkbox" checked={draft} onChange={(e) => setDraft(e.target.checked)} />
-            {tr('保存为草稿')}
-          </label>
-          <label className="checkbox-label">
-            <input
-              type="checkbox"
-              checked={writes || ['implement', 'bug'].includes(type)}
-              disabled={['implement', 'bug'].includes(type)}
-              onChange={(e) => setWrites(e.target.checked)}
-            />
-            {tr('需要修改代码')}
-          </label>
-        </div>
+            <TaskPicker label={tr('依赖任务')} value={deps} onChange={setDeps} exclude={parent} />
+            <div className="form-row">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={draft}
+                  onChange={(e) => setDraft(e.target.checked)}
+                />
+                {tr('保存为草稿')}
+              </label>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={writes || ['implement', 'bug', 'merge'].includes(type)}
+                  disabled={['implement', 'bug', 'merge'].includes(type)}
+                  onChange={(e) => setWrites(e.target.checked)}
+                />
+                {tr('需要修改代码')}
+              </label>
+            </div>
+          </>
+        )}
         <ErrorNotice error={error} />
         <div className="form-actions">
           <button type="button" className="button" onClick={onClose}>
@@ -250,7 +272,11 @@ export function NewTask({ onClose }: { onClose: () => void }) {
           </button>
           <button className="button primary" disabled={action.isPending}>
             <Plus size={16} />
-            {action.isPending ? tr('创建中…') : tr('创建任务')}
+            {action.isPending
+              ? tr('创建中…')
+              : !detailed || draft
+                ? tr('保存草稿')
+                : tr('创建任务')}
           </button>
         </div>
       </form>
@@ -261,13 +287,16 @@ export function TaskCard({
   task,
   draggable = false,
   grouped = false,
+  siblings,
 }: {
   task: TaskSummary;
   draggable?: boolean;
   grouped?: boolean;
+  siblings?: number[];
 }) {
   const tr = useI18n();
-  const { openTask } = useBoard();
+  const { openTask, me } = useBoard();
+  const action = useAction();
   const drag = useDraggable({
     id: task.id,
     disabled: !draggable || transitions[task.status].length === 0,
@@ -286,7 +315,26 @@ export function TaskCard({
     >
       <div className="task-card-top">
         <span className="mono">T-{task.id}</span>
-        <span className={`priority priority-${task.priority}`}>{task.priority}</span>
+        {me.kind === 'human' && !['done', 'cancelled'].includes(task.status) ? (
+          <select
+            className={`card-priority priority-${task.priority}`}
+            aria-label={tr('T-{0} 优先级', task.id)}
+            value={task.priority}
+            disabled={action.isPending}
+            onChange={(event) =>
+              action.mutate({
+                operation: 'update_task',
+                input: { id: task.id, priority: event.target.value as 'P2' },
+              })
+            }
+          >
+            {['P0', 'P1', 'P2', 'P3'].map((priority) => (
+              <option key={priority}>{priority}</option>
+            ))}
+          </select>
+        ) : (
+          <span className={`priority priority-${task.priority}`}>{task.priority}</span>
+        )}
         {draggable && transitions[task.status].length > 0 && (
           <button
             className="drag-handle"
@@ -303,7 +351,7 @@ export function TaskCard({
           {tr('↳ 父任务 T-{0}', task.parent_id)}
         </button>
       )}
-      <button className="task-title" onClick={() => openTask(task.id)}>
+      <button className="task-title" onClick={() => openTask(task.id, siblings)}>
         {task.title}
       </button>
       {task.repository && (
@@ -311,7 +359,9 @@ export function TaskCard({
           {task.repository}
         </div>
       )}
+      <ErrorNotice error={action.error} />
       <div className="task-card-tags">
+        <Badge status={task.status} />
         <span className="tag">{tr(typeNames[task.type])}</span>
         {task.writes_code && (
           <span title={tr('需要写入锁')}>
@@ -338,25 +388,28 @@ export function TaskCard({
   );
 }
 function Column({
-  status,
+  column,
   children,
   count,
+  allowed,
 }: {
-  status: TaskStatus;
+  column: (typeof boardColumns)[number];
   children: ReactNode;
   count: number;
+  allowed: boolean;
 }) {
   const tr = useI18n();
-  const drop = useDroppable({ id: status });
+  const drop = useDroppable({ id: column.id, disabled: !allowed });
   return (
     <section
       ref={drop.setNodeRef}
-      className={`kanban-column ${drop.isOver ? 'drag-over' : ''} ${count ? '' : 'empty'}`}
-      data-status={status}
-      aria-label={tr('{0} · {1} 项', tr(statusNames[status]), count)}
+      className={`kanban-column stage-column ${drop.isOver ? 'drag-over' : ''}`}
+      data-status={column.statuses[0]}
+      data-drop-disabled={!allowed || undefined}
+      aria-label={tr('{0} · {1} 项', tr(column.label), count)}
     >
       <div className="column-title">
-        <Badge status={status} />
+        <strong>{tr(column.label)}</strong>
         <span className="column-count">{count}</span>
       </div>
       <div className="column-cards">{children}</div>
@@ -372,6 +425,11 @@ export function TaskBoard() {
   const [grouped, setGrouped] = useState(true);
   const [page, setPage] = useState(0);
   const [archive, setArchive] = useState(false);
+  const [dragging, setDragging] = useState<TaskSummary>();
+  const [move, setMove] = useState<{ task: TaskSummary; targets: TaskStatus[] }>();
+  const [moveStatus, setMoveStatus] = useState<TaskStatus>();
+  const [moveReason, setMoveReason] = useState('');
+  const [moveCommit, setMoveCommit] = useState('');
   const tasks = useData<TaskSummary[]>('list_tasks', {
     repository: repository || undefined,
     assignee: assignee || undefined,
@@ -388,7 +446,8 @@ export function TaskBoard() {
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor),
   );
-  const columns = statuses.filter((s) => archive || !['done', 'cancelled'].includes(s));
+  const columns = boardColumns.filter((column) => archive || column.id !== 'finished');
+  const siblings = (tasks.data ?? []).map((task) => task.id);
   return (
     <>
       <div className="toolbar">
@@ -454,33 +513,44 @@ export function TaskBoard() {
             {tr('显示已结束')}
           </label>
         </div>
-        <span className="toolbar-hint">{tr('拖动卡片调整状态')}</span>
+        <span className="toolbar-hint">{tr('拖动卡片后确认具体状态')}</span>
       </div>
       <ErrorNotice error={tasks.error ?? action.error} />
       {notice && <div className="info-notice">{tr(notice)}</div>}
       <DndContext
         sensors={sensors}
+        onDragStart={(event) =>
+          setDragging(tasks.data?.find((task) => task.id === Number(event.active.id)))
+        }
+        onDragCancel={() => setDragging(undefined)}
         onDragEnd={(event) => {
+          setDragging(undefined);
           if (!event.over || action.isPending) return;
-          const task = tasks.data?.find((t) => t.id === Number(event.active.id));
-          const status = String(event.over.id) as TaskStatus;
-          if (!task || task.status === status) return;
-          if (status === 'in_review' && task.writes_code) {
-            setNotice('代码任务提交前需要指定 commit，请在任务详情中提交。');
-            openTask(task.id);
+          const task = tasks.data?.find((item) => item.id === Number(event.active.id));
+          if (
+            !task ||
+            boardColumns
+              .find((column) => column.id === event.over!.id)
+              ?.statuses.includes(task.status)
+          )
+            return;
+          const targets = dropTargets(task.status, String(event.over.id));
+          if (!targets.length) {
+            setNotice('当前状态不能移到这一列。');
             return;
           }
+          action.reset();
           setNotice('');
-          action.mutate({
-            operation: 'transition_task',
-            input: { id: task.id, status, reason: tr('通过看板调整任务状态') },
-          });
+          setMove({ task, targets });
+          setMoveStatus(targets[0]);
+          setMoveReason('');
+          setMoveCommit('');
         }}
       >
         <div className="kanban">
-          {columns.map((status) => {
+          {columns.map((column) => {
             const items = (tasks.data ?? [])
-              .filter((t) => t.status === status)
+              .filter((t) => column.statuses.includes(t.status))
               .sort((a, b) =>
                 grouped
                   ? (a.parent_id ?? a.id) - (b.parent_id ?? b.id) ||
@@ -489,7 +559,12 @@ export function TaskBoard() {
                   : 0,
               );
             return (
-              <Column key={status} status={status} count={items.length}>
+              <Column
+                key={column.id}
+                column={column}
+                count={items.length}
+                allowed={!dragging || dropTargets(dragging.status, column.id).length > 0}
+              >
                 {grouped
                   ? [...new Set(items.map(groupFor))].map((parentId) => (
                       <section
@@ -508,12 +583,22 @@ export function TaskBoard() {
                         {items
                           .filter((t) => groupFor(t) === parentId)
                           .map((task) => (
-                            <TaskCard key={task.id} task={task} draggable={me.kind === 'human'} />
+                            <TaskCard
+                              key={task.id}
+                              task={task}
+                              draggable={me.kind === 'human'}
+                              siblings={siblings}
+                            />
                           ))}
                       </section>
                     ))
                   : items.map((task) => (
-                      <TaskCard key={task.id} task={task} draggable={me.kind === 'human'} />
+                      <TaskCard
+                        key={task.id}
+                        task={task}
+                        draggable={me.kind === 'human'}
+                        siblings={siblings}
+                      />
                     ))}
                 {!items.length && <p className="column-empty">{tr('暂无任务')}</p>}
               </Column>
@@ -521,6 +606,89 @@ export function TaskBoard() {
           })}
         </div>
       </DndContext>
+      {move && (
+        <Dialog
+          title={tr('调整 T-{0} 的状态', move.task.id)}
+          onClose={() => {
+            setMove(undefined);
+            action.reset();
+          }}
+        >
+          <form
+            className="form-stack"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (!moveStatus) return;
+              try {
+                await action.mutateAsync({
+                  operation: 'transition_task',
+                  input: {
+                    id: move.task.id,
+                    status: moveStatus,
+                    reason: moveReason,
+                    ...(moveStatus === 'in_review' && move.task.writes_code
+                      ? { artifacts: [{ kind: 'commit', ref: moveCommit }] }
+                      : {}),
+                  },
+                });
+                setMove(undefined);
+              } catch {
+                /* Keep the requested change and show the validation failure. */
+              }
+            }}
+          >
+            <p>{move.task.title}</p>
+            <label>
+              {tr('目标状态')}
+              <select
+                value={moveStatus}
+                onChange={(event) => setMoveStatus(event.target.value as TaskStatus)}
+              >
+                {move.targets.map((status) => (
+                  <option key={status} value={status}>
+                    {tr(statusNames[status])}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              {tr('操作说明')}
+              <textarea
+                value={moveReason}
+                onChange={(event) => setMoveReason(event.target.value)}
+                required
+                autoFocus
+              />
+            </label>
+            {moveStatus === 'in_review' && move.task.writes_code && (
+              <label>
+                {tr('当前 commit SHA')}
+                <input
+                  value={moveCommit}
+                  onChange={(event) => setMoveCommit(event.target.value)}
+                  required
+                />
+              </label>
+            )}
+            <ErrorNotice error={action.error} />
+            <div className="form-actions">
+              <button
+                type="button"
+                className="button"
+                onClick={() => {
+                  setMove(undefined);
+                  action.reset();
+                }}
+              >
+                {tr('取消')}
+              </button>
+              <button className="button primary" disabled={action.isPending || !moveReason.trim()}>
+                {tr('确认调整')}
+              </button>
+            </div>
+          </form>
+        </Dialog>
+      )}
       {((tasks.data?.length ?? 0) === 200 || page > 0) && (
         <div className="pagination">
           <button disabled={page === 0} onClick={() => setPage(page - 1)}>
@@ -535,7 +703,7 @@ export function TaskBoard() {
     </>
   );
 }
-export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }) {
+export function TaskDetails({ id }: { id: number }) {
   const tr = useI18n();
   const task = useData<Task>('get_task', { id });
   const settings = useData<Settings>('get_settings');
@@ -544,10 +712,25 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
   const action = useAction();
   const [editing, setEditing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [creatingChild, setCreatingChild] = useState(false);
+  const [tab, setTab] = useState('content');
+  const [dependentPage, setDependentPage] = useState(0);
+  const dependents = useData<TaskSummary[]>('list_tasks', {
+    depends_on: id,
+    limit: 20,
+    offset: dependentPage * 20,
+  });
   const [reason, setReason] = useState('');
   const [target, setTarget] = useState<TaskStatus>();
   const [commit, setCommit] = useState('');
   const t = task.data;
+  const parentTask = useData<Task>('get_task', { id: t?.parent_id }, Boolean(t?.parent_id));
+  const scopeLocked =
+    settings.data?.approval_mode === 'plan' &&
+    Boolean(
+      t?.plan_approved_at ||
+        (t?.parent_id && (!parentTask.data || parentTask.data.plan_approved_at)),
+    );
   const [childPage, setChildPage] = useState(0);
   const children = useData<TaskSummary[]>(
     'list_tasks',
@@ -569,7 +752,7 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
       { onSuccess: () => setTarget(undefined) },
     );
   return (
-    <Dialog title={tr('T-{0} · 任务详情', id)} onClose={onClose} wide>
+    <div className="task-detail">
       <ErrorNotice error={task.error ?? action.error} />
       {t ? (
         <>
@@ -595,7 +778,11 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
                 </button>
               )}
             </div>
-            <h1>{t.title}</h1>
+            <InlineTaskText
+              task={t}
+              field="title"
+              disabled={me.kind !== 'human' || ['done', 'cancelled'].includes(t.status)}
+            />
             <div className="detail-meta">
               <span>{tr('创建者 @{0}', t.creator)}</span>
               <span>{tr('负责人 {0}', t.assignee ? `@${t.assignee}` : tr('待认领'))}</span>
@@ -603,358 +790,482 @@ export function TaskDetails({ id, onClose }: { id: number; onClose: () => void }
               <span>{tr('返工 {0} 次', t.attempt)}</span>
             </div>
           </div>
-          <div className="detail-grid">
-            <div>
-              <section className="detail-section">
-                <h3>{tr('任务描述')}</h3>
-                <Markdown>{t.description || tr('暂无描述')}</Markdown>
-              </section>
-              <section className="detail-section">
-                <h3>
-                  {tr('验收标准')}{' '}
-                  <span className="muted">
-                    {t.acceptance_criteria.filter((c) => c.checked).length}/
-                    {t.acceptance_criteria.length}
-                  </span>
-                </h3>
-                {t.acceptance_criteria.length ? (
-                  t.acceptance_criteria.map((c) => (
-                    <label className="criterion" key={c.id}>
-                      <input
-                        type="checkbox"
-                        checked={c.checked}
-                        disabled={
-                          action.isPending || t.status !== 'in_review' || t.assignee === me.handle
-                        }
-                        onChange={(e) =>
-                          action.mutate({
-                            operation: 'update_task',
-                            input: {
-                              id,
-                              criteria_check: [{ id: c.id, checked: e.target.checked }],
-                            },
-                          })
-                        }
-                      />
-                      <span>{c.text}</span>
-                      {c.checked && <CheckCircle2 size={14} />}
-                    </label>
-                  ))
-                ) : (
-                  <p className="muted">{tr('未设置验收标准')}</p>
+          {t.handoff && (
+            <section className="handoff-summary" aria-label={tr('当前结果与下一步')}>
+              <p>{t.handoff.summary}</p>
+              <div className="handoff-next">
+                <strong>{tr(actionNames[t.handoff.next_action.action])}</strong>
+                <span>
+                  {t.handoff.next_action.actor === 'human'
+                    ? tr('人工')
+                    : `@${t.handoff.next_action.actor}`}
+                </span>
+                {!['done', 'cancelled'].includes(t.status) && (
+                  <button
+                    className="text-button"
+                    onClick={() => {
+                      setTab('content');
+                      requestAnimationFrame(() =>
+                        document
+                          .getElementById('task-human-controls')
+                          ?.scrollIntoView({ block: 'start' }),
+                      );
+                    }}
+                  >
+                    {tr('查看操作')}
+                  </button>
                 )}
-              </section>
-              {Object.keys(t.context).length > 0 && (
-                <section className="detail-section">
-                  <h3>{tr('交接上下文')}</h3>
-                  {Object.entries(t.context).map(([key, value]) => (
-                    <div key={key}>
-                      <span className="muted small">{key}</span>
-                      <p className="message-body">
-                        {typeof value === 'string' ? value : JSON.stringify(value, null, 2)}
-                      </p>
-                    </div>
-                  ))}
-                </section>
-              )}
-              <section className="detail-section">
-                <h3>
-                  {tr('产物')}
-                  <span className="muted">{t.artifacts.length}</span>
-                </h3>
-                {t.artifacts.length ? (
-                  t.artifacts.map((a) => (
-                    <div className="artifact" key={a.id}>
-                      <GitCommitHorizontal size={16} />
-                      <span className="tag">{a.kind}</span>
-                      {['pr', 'url'].includes(a.kind) && /^https?:\/\//i.test(a.ref) ? (
-                        <a href={a.ref} target="_blank" rel="noreferrer">
-                          {a.label ?? a.ref}
-                          <ArrowUpRight size={12} />
-                        </a>
-                      ) : (
-                        <code>{a.ref}</code>
-                      )}
-                    </div>
-                  ))
-                ) : (
-                  <p className="muted">{tr('提交后，commit、报告和链接会显示在这里。')}</p>
-                )}
-              </section>
-            </div>
-            <aside>
-              <section className="detail-section">
-                <h3>{tr('目标仓库')}</h3>
-                <p className="repository-path">
-                  {t.repository ??
-                    (t.writes_code
-                      ? tr('尚未选择，开工前请编辑任务补充。')
-                      : tr('未指定，可用于跨仓库规划。'))}
+              </div>
+              {t.handoff.blockers.map((blocker) => (
+                <p className="danger small" key={blocker.code}>
+                  {blocker.reason}
                 </p>
-              </section>
-              <section className="detail-section">
-                <h3>{tr('关联任务')}</h3>
-                {t.workflow_plan && (
-                  <>
-                    <p className="muted small">
-                      {tr('批准计划后，以下任务可按依赖自动推进。新增范围需另建计划。')}
-                    </p>
-                    <ErrorNotice error={children.error} />
-                    <div className="dependency-list">
-                      {children.data?.map((child) => (
-                        <button
-                          className="text-button"
-                          key={child.id}
-                          onClick={() => openTask(child.id)}
-                        >
-                          T-{child.id} · {child.title} · {tr(statusNames[child.status])}
-                        </button>
+              ))}
+              {t.handoff.lock && (
+                <details>
+                  <summary>{tr('仓库占用说明')}</summary>
+                  <p>{t.handoff.lock.purpose}</p>
+                </details>
+              )}
+            </section>
+          )}
+          <div className="task-tabs" role="tablist" aria-label={tr('任务详情分区')}>
+            {taskTabs.map(([key, label], index) => (
+              <button
+                role="tab"
+                id={`task-tab-${key}`}
+                aria-controls={`task-panel-${key}`}
+                aria-selected={tab === key}
+                tabIndex={tab === key ? 0 : -1}
+                key={key}
+                onClick={() => setTab(key)}
+                onKeyDown={(event) => {
+                  const next =
+                    event.key === 'ArrowRight'
+                      ? (index + 1) % 3
+                      : event.key === 'ArrowLeft'
+                        ? (index + 2) % 3
+                        : event.key === 'Home'
+                          ? 0
+                          : event.key === 'End'
+                            ? 2
+                            : undefined;
+                  if (next !== undefined) {
+                    event.preventDefault();
+                    setTab(taskTabs[next]![0]);
+                    document.getElementById(`task-tab-${taskTabs[next]![0]}`)?.focus();
+                  }
+                }}
+              >
+                {tr(label)}
+              </button>
+            ))}
+          </div>
+          {tab === 'runs' && (
+            <div role="tabpanel" id="task-panel-runs" aria-labelledby="task-tab-runs">
+              <TaskRuns id={id} />
+            </div>
+          )}
+          {tab === 'content' && (
+            <div role="tabpanel" id="task-panel-content" aria-labelledby="task-tab-content">
+              <div className="detail-grid">
+                <div>
+                  <section className="detail-section">
+                    <h3>{tr('任务描述')}</h3>
+                    <InlineTaskText
+                      task={t}
+                      field="description"
+                      disabled={
+                        me.kind !== 'human' ||
+                        scopeLocked ||
+                        ['done', 'cancelled'].includes(t.status)
+                      }
+                    />
+                  </section>
+                  <section className="detail-section">
+                    <h3>
+                      {tr('验收标准')}{' '}
+                      <span className="muted">
+                        {t.acceptance_criteria.filter((c) => c.checked).length}/
+                        {t.acceptance_criteria.length}
+                      </span>
+                    </h3>
+                    {t.acceptance_criteria.length ? (
+                      t.acceptance_criteria.map((c) => (
+                        <label className="criterion" key={c.id}>
+                          <input
+                            type="checkbox"
+                            checked={c.checked}
+                            disabled={
+                              action.isPending ||
+                              t.status !== 'in_review' ||
+                              t.assignee === me.handle
+                            }
+                            onChange={(e) =>
+                              action.mutate({
+                                operation: 'update_task',
+                                input: {
+                                  id,
+                                  criteria_check: [{ id: c.id, checked: e.target.checked }],
+                                },
+                              })
+                            }
+                          />
+                          <span>{c.text}</span>
+                          {c.checked && <CheckCircle2 size={14} />}
+                        </label>
+                      ))
+                    ) : (
+                      <p className="muted">{tr('未设置验收标准')}</p>
+                    )}
+                  </section>
+                  {Object.keys(t.context).length > 0 && (
+                    <section className="detail-section">
+                      <h3>{tr('交接上下文')}</h3>
+                      {Object.entries(t.context).map(([key, value]) => (
+                        <div key={key}>
+                          <span className="muted small">{key}</span>
+                          <p className="message-body">
+                            {typeof value === 'string' ? value : JSON.stringify(value, null, 2)}
+                          </p>
+                        </div>
                       ))}
-                    </div>
-                    {(childPage > 0 || children.data?.length === 200) && (
+                    </section>
+                  )}
+                  <section className="detail-section">
+                    <h3>
+                      {tr('产物')}
+                      <span className="muted">{t.artifacts.length}</span>
+                    </h3>
+                    {t.artifacts.length ? (
+                      t.artifacts.map((a) => (
+                        <div className="artifact" key={a.id}>
+                          <GitCommitHorizontal size={16} />
+                          <span className="tag">{a.kind}</span>
+                          {['pr', 'url'].includes(a.kind) && /^https?:\/\//i.test(a.ref) ? (
+                            <a href={a.ref} target="_blank" rel="noreferrer">
+                              {a.label ?? a.ref}
+                              <ArrowUpRight size={12} />
+                            </a>
+                          ) : (
+                            <code>{a.ref}</code>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <p className="muted">{tr('提交后，commit、报告和链接会显示在这里。')}</p>
+                    )}
+                  </section>
+                </div>
+                <aside>
+                  <section className="detail-section">
+                    <h3>{tr('目标仓库')}</h3>
+                    <p className="repository-path">
+                      {t.repository ??
+                        (t.writes_code
+                          ? tr('尚未选择，开工前请编辑任务补充。')
+                          : tr('未指定，可用于跨仓库规划。'))}
+                    </p>
+                  </section>
+                  <section className="detail-section">
+                    <h3>{tr('关联任务')}</h3>
+                    {t.type === 'plan' &&
+                      !t.plan_approved_at &&
+                      !['done', 'cancelled'].includes(t.status) && (
+                        <button className="text-button" onClick={() => setCreatingChild(true)}>
+                          <Plus size={14} />
+                          {tr('添加子任务')}
+                        </button>
+                      )}
+                    {t.workflow_plan && (
+                      <>
+                        <p className="muted small">
+                          {tr('批准计划后，可按依赖派发以下任务。新增范围需另建计划。')}
+                        </p>
+                        <ErrorNotice error={children.error} />
+                        <div className="dependency-list">
+                          {children.data?.map((child) => (
+                            <button
+                              className="text-button"
+                              key={child.id}
+                              onClick={() => openTask(child.id)}
+                            >
+                              T-{child.id} · {child.title} · {tr(statusNames[child.status])}
+                            </button>
+                          ))}
+                        </div>
+                        {(childPage > 0 || children.data?.length === 200) && (
+                          <div className="pagination">
+                            <button
+                              disabled={childPage === 0}
+                              onClick={() => setChildPage(childPage - 1)}
+                            >
+                              {tr('上一页')}
+                            </button>
+                            <button
+                              disabled={children.data?.length !== 200}
+                              onClick={() => setChildPage(childPage + 1)}
+                            >
+                              {tr('下一页')}
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {t.parent_id && <TaskReference id={t.parent_id} />}
+                    <h4>{tr('依赖这些任务')}</h4>
+                    {t.depends_on.map((dep) => (
+                      <TaskReference key={dep} id={dep} />
+                    ))}
+                    {!t.depends_on.length && <p className="muted small">{tr('无依赖')}</p>}
+                    <h4>{tr('这些任务依赖此任务')}</h4>
+                    <ErrorNotice error={dependents.error} />
+                    {dependents.data?.map((dependent) => (
+                      <TaskReference key={dependent.id} id={dependent.id} />
+                    ))}
+                    {dependents.data?.length === 0 && (
+                      <p className="muted small">{tr('暂无后续依赖')}</p>
+                    )}
+                    {(dependentPage > 0 || dependents.data?.length === 20) && (
                       <div className="pagination">
                         <button
-                          disabled={childPage === 0}
-                          onClick={() => setChildPage(childPage - 1)}
+                          disabled={dependentPage === 0}
+                          onClick={() => setDependentPage(dependentPage - 1)}
                         >
                           {tr('上一页')}
                         </button>
                         <button
-                          disabled={children.data?.length !== 200}
-                          onClick={() => setChildPage(childPage + 1)}
+                          disabled={dependents.data?.length !== 20}
+                          onClick={() => setDependentPage(dependentPage + 1)}
                         >
                           {tr('下一页')}
                         </button>
                       </div>
                     )}
-                  </>
-                )}
-                {t.parent_id && (
-                  <button className="text-button" onClick={() => openTask(t.parent_id!)}>
-                    {tr('父任务 T-{0}', t.parent_id)}
-                  </button>
-                )}
-                <div className="dependency-list">
-                  {t.depends_on.map((dep) => (
-                    <button className="tag" key={dep} onClick={() => openTask(dep)}>
-                      {tr('依赖 T-{0}', dep)}
-                    </button>
-                  ))}
-                </div>
-                {!t.parent_id && !t.depends_on.length && <p className="muted">{tr('无依赖')}</p>}
-              </section>
-              {t.lease_until && (
-                <section className="detail-section">
-                  <h3>{tr('认领租约')}</h3>
-                  <p className={t.lease_expired_at ? 'danger' : 'muted'}>
-                    {t.lease_expired_at
-                      ? tr('已过期，写入锁仍保留')
-                      : tr('到期 {0}', time(t.lease_until))}
-                  </p>
-                </section>
-              )}
-              {t.labels.length > 0 && (
-                <section className="detail-section">
-                  <h3>{tr('标签')}</h3>
-                  {t.labels.map((label) => (
-                    <span className="tag" key={label}>
-                      {label}
-                    </span>
-                  ))}
-                </section>
-              )}
-              {me.kind === 'human' && (
-                <section className="human-controls">
-                  <h3>{tr('人工操作')}</h3>
-                  {approvals.data
-                    ?.filter((a) => a.task_id === id)
-                    .map((a) => (
-                      <div className="approval-inline" key={a.id}>
-                        <strong>{tr('申请：{0}', tr(statusNames[a.to_status]))}</strong>
-                        <p>{a.reason}</p>
-                        <button
-                          className="button primary"
-                          disabled={action.isPending}
-                          onClick={() => {
-                            setTarget(a.to_status);
-                            if (a.to_status !== 'in_review') perform(a.to_status);
-                          }}
-                        >
-                          {t.type === 'plan' && a.to_status === 'open'
-                            ? tr('批准计划')
-                            : t.type === 'merge' && a.to_status === 'open'
-                              ? tr('批准合入')
-                              : tr('批准')}
-                        </button>
-                        <button
-                          className="button subtle"
-                          disabled={action.isPending || !reason.trim()}
-                          onClick={() =>
-                            action.mutate({
-                              operation: 'reject_approval',
-                              input: { id: a.id, reason },
-                            })
-                          }
-                        >
-                          {tr('驳回')}
-                        </button>
-                      </div>
-                    ))}
-                  {['done', 'cancelled'].includes(t.status) && (
-                    <p className="muted small">{tr('任务已结束，历史记录会完整保留。')}</p>
+                  </section>
+                  {t.lease_until && (
+                    <section className="detail-section">
+                      <h3>{tr('认领租约')}</h3>
+                      <p className={t.lease_expired_at ? 'danger' : 'muted'}>
+                        {t.lease_expired_at
+                          ? tr('已过期，写入锁仍保留')
+                          : tr('到期 {0}', time(t.lease_until))}
+                      </p>
+                    </section>
                   )}
-                  {!['done', 'cancelled'].includes(t.status) && (
-                    <>
-                      {t.workflow_plan &&
-                        t.status === 'draft' &&
-                        !approvals.data?.some((a) => a.task_id === id) && (
-                          <button
-                            className="button primary"
-                            disabled={action.isPending}
-                            onClick={() => perform('open')}
-                          >
-                            {tr('批准计划')}
-                          </button>
-                        )}
-                      <label>
-                        {tr('操作说明')}
-                        <textarea
-                          aria-label={tr('人工操作说明')}
-                          value={reason}
-                          onChange={(e) => setReason(e.target.value)}
-                          rows={3}
-                          placeholder={tr('说明审批、驳回或调整的原因')}
-                        />
-                      </label>
-                      {!t.workflow_plan && (
-                        <>
-                          <label>
-                            {tr('调整状态')}
-                            <select
-                              aria-label={tr('调整任务状态')}
-                              value={target ?? ''}
-                              onChange={(e) => setTarget(e.target.value as TaskStatus)}
+                  {t.labels.length > 0 && (
+                    <section className="detail-section">
+                      <h3>{tr('标签')}</h3>
+                      {t.labels.map((label) => (
+                        <span className="tag" key={label}>
+                          {label}
+                        </span>
+                      ))}
+                    </section>
+                  )}
+                  {me.kind === 'human' && (
+                    <section className="human-controls" id="task-human-controls">
+                      <h3>{tr('人工操作')}</h3>
+                      {approvals.data
+                        ?.filter((a) => a.task_id === id)
+                        .map((a) => (
+                          <div className="approval-inline" key={a.id}>
+                            <strong>{tr('申请：{0}', tr(statusNames[a.to_status]))}</strong>
+                            <p>{a.reason}</p>
+                            <button
+                              className="button primary"
+                              disabled={action.isPending}
+                              onClick={() => {
+                                setTarget(a.to_status);
+                                if (a.to_status !== 'in_review') perform(a.to_status);
+                              }}
                             >
-                              <option value="">{tr('选择下一状态')}</option>
-                              {transitions[t.status]
-                                .filter((s) => s !== 'cancelled')
-                                .map((s) => (
-                                  <option key={s} value={s}>
-                                    {tr(statusNames[s])}
-                                    {settings.data && isGated(settings.data, t.status, s, t.type)
-                                      ? tr(' · 人工审批')
-                                      : ''}
-                                  </option>
-                                ))}
-                            </select>
-                          </label>
-                          {target === 'in_review' && t.writes_code && (
-                            <label>
-                              {tr('当前 commit SHA')}
-                              <input
-                                aria-label={tr('当前 commit SHA')}
-                                value={commit}
-                                onChange={(e) => setCommit(e.target.value)}
-                                placeholder={tr('完整 commit SHA')}
-                                required
-                              />
-                            </label>
-                          )}
-                          <button
-                            className="button primary"
-                            disabled={action.isPending || !target || !reason.trim()}
-                            onClick={() => {
-                              if (target) perform(target);
-                            }}
-                          >
-                            {tr('确认调整')}
-                          </button>
-                          <label>
-                            {tr('负责人')}
-                            <select
-                              aria-label={tr('改派负责人')}
-                              value={t.assignee ?? ''}
-                              disabled={
-                                action.isPending || ['draft', 'in_review'].includes(t.status)
-                              }
-                              onChange={(e) =>
+                              {t.type === 'plan' && a.to_status === 'open'
+                                ? tr('批准计划')
+                                : t.type === 'merge' && a.to_status === 'open'
+                                  ? tr('批准合入')
+                                  : tr('批准')}
+                            </button>
+                            <button
+                              className="button subtle"
+                              disabled={action.isPending || !reason.trim()}
+                              onClick={() =>
                                 action.mutate({
-                                  operation: 'update_task',
-                                  input: { id, assignee: e.target.value || null },
+                                  operation: 'reject_approval',
+                                  input: { id: a.id, reason },
                                 })
                               }
                             >
-                              <option value="">{tr('待认领')}</option>
-                              {participants.map((p) => (
-                                <option key={p.handle} value={p.handle}>
-                                  @{p.handle}
-                                </option>
+                              {tr('驳回')}
+                            </button>
+                          </div>
+                        ))}
+                      {['done', 'cancelled'].includes(t.status) && (
+                        <p className="muted small">{tr('任务已结束，历史记录会完整保留。')}</p>
+                      )}
+                      {!['done', 'cancelled'].includes(t.status) && (
+                        <>
+                          {t.workflow_plan &&
+                            t.status === 'draft' &&
+                            !approvals.data?.some((a) => a.task_id === id) && (
+                              <button
+                                className="button primary"
+                                disabled={action.isPending}
+                                onClick={() => perform('open')}
+                              >
+                                {tr('批准计划')}
+                              </button>
+                            )}
+                          <label>
+                            {tr('操作说明')}
+                            <textarea
+                              aria-label={tr('人工操作说明')}
+                              value={reason}
+                              onChange={(e) => setReason(e.target.value)}
+                              rows={3}
+                              placeholder={tr('说明审批、驳回或调整的原因')}
+                            />
+                          </label>
+                          {!t.workflow_plan && (
+                            <>
+                              <label>
+                                {tr('调整状态')}
+                                <select
+                                  aria-label={tr('调整任务状态')}
+                                  value={target ?? ''}
+                                  onChange={(e) => setTarget(e.target.value as TaskStatus)}
+                                >
+                                  <option value="">{tr('选择下一状态')}</option>
+                                  {transitions[t.status]
+                                    .filter((s) => s !== 'cancelled')
+                                    .map((s) => (
+                                      <option key={s} value={s}>
+                                        {tr(statusNames[s])}
+                                        {settings.data &&
+                                        isGated(settings.data, t.status, s, t.type)
+                                          ? tr(' · 人工审批')
+                                          : ''}
+                                      </option>
+                                    ))}
+                                </select>
+                              </label>
+                              {target === 'in_review' && t.writes_code && (
+                                <label>
+                                  {tr('当前 commit SHA')}
+                                  <input
+                                    aria-label={tr('当前 commit SHA')}
+                                    value={commit}
+                                    onChange={(e) => setCommit(e.target.value)}
+                                    placeholder={tr('完整 commit SHA')}
+                                    required
+                                  />
+                                </label>
+                              )}
+                              <button
+                                className="button primary"
+                                disabled={action.isPending || !target || !reason.trim()}
+                                onClick={() => {
+                                  if (target) perform(target);
+                                }}
+                              >
+                                {tr('确认调整')}
+                              </button>
+                              <label>
+                                {tr('负责人')}
+                                <select
+                                  aria-label={tr('改派负责人')}
+                                  value={t.assignee ?? ''}
+                                  disabled={
+                                    action.isPending || ['draft', 'in_review'].includes(t.status)
+                                  }
+                                  onChange={(e) =>
+                                    action.mutate({
+                                      operation: 'update_task',
+                                      input: { id, assignee: e.target.value || null },
+                                    })
+                                  }
+                                >
+                                  <option value="">{tr('待认领')}</option>
+                                  {participants.map((p) => (
+                                    <option key={p.handle} value={p.handle}>
+                                      @{p.handle}
+                                    </option>
+                                  ))}
+                                </select>
+                              </label>
+                            </>
+                          )}
+                          <label>
+                            {tr('优先级')}
+                            <select
+                              aria-label={tr('修改优先级')}
+                              value={t.priority}
+                              disabled={action.isPending}
+                              onChange={(e) =>
+                                action.mutate({
+                                  operation: 'update_task',
+                                  input: { id, priority: e.target.value as 'P2' },
+                                })
+                              }
+                            >
+                              {['P0', 'P1', 'P2', 'P3'].map((p) => (
+                                <option key={p}>{p}</option>
                               ))}
                             </select>
                           </label>
+                          <button
+                            className="button"
+                            disabled={action.isPending}
+                            onClick={() =>
+                              action.mutate({
+                                operation: 'update_task',
+                                input: { id, frozen: !t.frozen },
+                              })
+                            }
+                          >
+                            <Snowflake size={15} />
+                            {t.frozen ? tr('恢复任务') : tr('冻结任务')}
+                          </button>
+                          {t.plan_approved_at && (
+                            <p className="muted small">
+                              {tr('计划范围已批准。新增或变更范围请创建后续计划。')}
+                            </p>
+                          )}
+                          <button
+                            className="text-button"
+                            disabled={scopeLocked}
+                            onClick={() => setEditing(true)}
+                          >
+                            {tr('编辑任务与依赖')}
+                          </button>
                         </>
                       )}
-                      <label>
-                        {tr('优先级')}
-                        <select
-                          aria-label={tr('修改优先级')}
-                          value={t.priority}
-                          disabled={action.isPending}
-                          onChange={(e) =>
-                            action.mutate({
-                              operation: 'update_task',
-                              input: { id, priority: e.target.value as 'P2' },
-                            })
-                          }
-                        >
-                          {['P0', 'P1', 'P2', 'P3'].map((p) => (
-                            <option key={p}>{p}</option>
-                          ))}
-                        </select>
-                      </label>
-                      <button
-                        className="button"
-                        disabled={action.isPending}
-                        onClick={() =>
-                          action.mutate({
-                            operation: 'update_task',
-                            input: { id, frozen: !t.frozen },
-                          })
-                        }
-                      >
-                        <Snowflake size={15} />
-                        {t.frozen ? tr('恢复任务') : tr('冻结任务')}
-                      </button>
-                      {t.plan_approved_at && (
-                        <p className="muted small">
-                          {tr('计划范围已批准。新增或变更范围请创建后续计划。')}
-                        </p>
-                      )}
-                      <button
-                        className="text-button"
-                        disabled={Boolean(t.plan_approved_at)}
-                        onClick={() => setEditing(true)}
-                      >
-                        {tr('编辑任务与依赖')}
-                      </button>
-                    </>
+                    </section>
                   )}
-                </section>
-              )}
-            </aside>
-          </div>
-          <section className="detail-section">
-            <h3>{tr('统一时间线')}</h3>
-            <Composer destination={{ task_id: id }} />
-            <EventList taskId={id} />
-          </section>
+                </aside>
+              </div>
+            </div>
+          )}
+          {tab === 'discussion' && (
+            <section
+              className="detail-section"
+              role="tabpanel"
+              id="task-panel-discussion"
+              aria-labelledby="task-tab-discussion"
+            >
+              <h3>{tr('讨论记录')}</h3>
+              <Composer destination={{ task_id: id }} />
+              <EventList taskId={id} />
+            </section>
+          )}
+          {creatingChild && <NewTask parentTask={t} onClose={() => setCreatingChild(false)} />}
           {editing && <EditTask task={t} onClose={() => setEditing(false)} />}
           {cancelling && <CancelTask task={t} onClose={() => setCancelling(false)} />}
         </>
       ) : (
         !task.error && <Empty title={tr('正在读取任务…')} />
       )}
-    </Dialog>
+    </div>
   );
 }
 
@@ -1028,7 +1339,7 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description);
   const [criteria, setCriteria] = useState(task.acceptance_criteria.map((c) => c.text).join('\n'));
-  const [dependencies, setDependencies] = useState(task.depends_on.join(', '));
+  const [dependencies, setDependencies] = useState(task.depends_on);
   const action = useAction();
   return (
     <Dialog title={tr('编辑任务')} onClose={onClose}>
@@ -1046,14 +1357,8 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
                 ...(repository !== (task.repository ?? '')
                   ? { repository: repository.trim() || null }
                   : {}),
-                ...(dependencies !== task.depends_on.join(', ')
-                  ? {
-                      depends_on: dependencies
-                        .split(',')
-                        .map((s) => s.trim())
-                        .filter(Boolean)
-                        .map(Number),
-                    }
+                ...(JSON.stringify(dependencies) !== JSON.stringify(task.depends_on)
+                  ? { depends_on: dependencies }
                   : {}),
                 ...(criteria !== task.acceptance_criteria.map((c) => c.text).join('\n')
                   ? {
@@ -1105,17 +1410,12 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
           <span className="label-hint">{tr('修改标准会重置勾选状态')}</span>
           <textarea rows={4} value={criteria} onChange={(e) => setCriteria(e.target.value)} />
         </label>
-        <label>
-          {tr('依赖任务')}
-          <span className="label-hint">
-            {tr('输入任务 ID，以逗号分隔。前置任务取消后，可在这里移除或替换。')}
-          </span>
-          <input
-            value={dependencies}
-            onChange={(e) => setDependencies(e.target.value)}
-            disabled={['in_progress', 'in_review'].includes(task.status)}
-          />
-        </label>
+        <TaskPicker
+          label={tr('依赖任务')}
+          value={dependencies}
+          onChange={setDependencies}
+          exclude={[task.id]}
+        />
         <ErrorNotice error={action.error} />
         <button className="button primary" disabled={action.isPending}>
           {tr('保存')}

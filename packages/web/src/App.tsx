@@ -1,6 +1,12 @@
 import { useI18n, locale } from './i18n.js';
 import { setPreferences, usePreferences, type Preferences, type Language } from './preferences.js';
-import { useMemo, useState, useEffect, type ReactNode } from 'react';
+import {
+  useMemo,
+  useRef,
+  useState,
+  useEffect,
+  type ReactNode,
+} from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { BoardClient } from '@baton/client';
 import {
@@ -47,7 +53,6 @@ import {
   errorText,
   greeting,
   lunarDate,
-  statusNames,
   useAction,
   useBoard,
   useData,
@@ -57,6 +62,9 @@ import { useGlassLight, useGlassParams, useLiquidGlass } from './glass.js';
 import { GlassTuner } from './tuner.js';
 import { Inbox, Messages, MessageCard } from './messages.js';
 import { NewTask, TaskBoard, TaskDetails } from './tasks.js';
+import { TaskDrawer } from './TaskDrawer.js';
+import { taskFromHash } from './task-ui.js';
+import { AttentionQueue } from './AttentionQueue.js';
 
 type Page = 'overview' | 'board' | 'inbox' | 'messages' | 'agents' | 'decisions' | 'settings';
 const navigation: {
@@ -110,7 +118,7 @@ const navigation: {
 ];
 const navigationGroups = [...new Set(navigation.map((item) => item.group))];
 const pageFromHash = (): Page => {
-  const id = location.hash.slice(1);
+  const id = location.hash.slice(1).split('?')[0];
   return navigation.some((item) => item.id === id) ? (id as Page) : 'overview';
 };
 const todayLabel = (date: Date) =>
@@ -148,8 +156,17 @@ export function App() {
   });
   const connection = useEvents(api, overview.data?.event_cursor);
   const [page, setCurrentPage] = useState<Page>(pageFromHash);
+  const [taskId, setTaskId] = useState<number | undefined>(() => taskFromHash(location.hash));
+  const [taskSiblings, setTaskSiblings] = useState<number[]>([]);
+  const returnFocus = useRef<HTMLElement | null>(null);
   useEffect(() => {
-    const sync = () => setCurrentPage(pageFromHash());
+    if (taskId === undefined) returnFocus.current?.focus({ preventScroll: true });
+  }, [taskId]);
+  useEffect(() => {
+    const sync = () => {
+      setCurrentPage(pageFromHash());
+      setTaskId(taskFromHash(location.hash));
+    };
     window.addEventListener('hashchange', sync);
     return () => window.removeEventListener('hashchange', sync);
   }, []);
@@ -160,7 +177,14 @@ export function App() {
   const setPage = (next: Page) => {
     if (next !== page) location.hash = next;
   };
-  const [taskId, setTaskId] = useState<number>();
+  const openTask = (id: number, siblings?: number[]) => {
+    if (taskId === undefined) returnFocus.current = document.activeElement as HTMLElement;
+    if (siblings) setTaskSiblings(siblings);
+    location.hash = `${page}?task=${id}`;
+  };
+  const closeTask = () => {
+    location.hash = page;
+  };
   const [creating, setCreating] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false);
   const [topbar, setTopbar] = useState<HTMLDivElement | null>(null);
@@ -197,12 +221,12 @@ export function App() {
       value={{
         api,
         me,
-        openTask: setTaskId,
+        openTask,
         participants: overview.data?.participants ?? [],
         repositories: overview.data?.repositories ?? [],
       }}
     >
-      <div className="app-shell">
+      <div className={`app-shell${taskId !== undefined ? ' has-task-drawer' : ''}`}>
         <aside className="sidebar glass" ref={setSidebar}>
           <Brand />
           <nav aria-label={tr('主导航')}>
@@ -301,7 +325,9 @@ export function App() {
       {creating && <NewTask onClose={() => setCreating(false)} />}
       {editingProfile && <EditProfile onClose={() => setEditingProfile(false)} />}
       {taskId !== undefined && (
-        <TaskDetails key={taskId} id={taskId} onClose={() => setTaskId(undefined)} />
+        <TaskDrawer id={taskId} siblings={taskSiblings} onClose={closeTask}>
+          <TaskDetails key={taskId} id={taskId} />
+        </TaskDrawer>
       )}
     </BoardContext.Provider>
   );
@@ -514,19 +540,6 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
   const [actor, setActor] = useState('');
   const [activityTask, setActivityTask] = useState('');
   const [activityType, setActivityType] = useState('');
-  const [questionPages, setQuestionPages] = useState<(number | undefined)[]>([undefined]);
-  const inbox = useData<import('@baton/shared').Mention[]>('check_inbox', {
-    kind: 'question',
-    order: 'desc',
-    limit: 10,
-    before: questionPages.at(-1),
-  });
-  const [reviewPage, setReviewPage] = useState(0);
-  const reviewing = useData<TaskSummary[]>('list_tasks', {
-    status: 'in_review',
-    limit: 20,
-    offset: reviewPage * 20,
-  });
   const total = Object.values(data?.counts ?? {}).reduce((sum, n) => sum + (n ?? 0), 0);
   const agents = participants.filter((p) => p.kind === 'agent');
   const metrics: {
@@ -676,93 +689,7 @@ function Overview({ data, go }: { data?: OverviewData; go: (page: Page) => void 
             compact
           />
         </section>
-        <aside className="attention-panel">
-          <div className="panel-heading">
-            <h2>{tr('需要我处理')}</h2>
-          </div>
-          <ErrorNotice error={inbox.error ?? reviewing.error} />
-          {data?.approvals.map((a) => (
-            <button
-              className="attention-card approval"
-              key={`a${a.id}`}
-              onClick={() => openTask(a.task_id)}
-            >
-              <span className="eyebrow">{tr('待审批 · {0}', tr(statusNames[a.to_status]))}</span>
-              <strong>{a.title}</strong>
-              <p>{a.reason}</p>
-              <span className="small muted">
-                T-{a.task_id} · @{a.requester}
-                <ArrowUpRight size={13} />
-              </span>
-            </button>
-          ))}
-          {data?.attention.map((t) => (
-            <button className="attention-card blocked" key={t.id} onClick={() => openTask(t.id)}>
-              <span className="eyebrow">
-                {t.lease_expired_at ? tr('租约到期') : t.frozen ? tr('任务已冻结') : tr('任务阻塞')}
-              </span>
-              <strong>{t.title}</strong>
-              <span className="small muted">
-                T-{t.id} · {t.assignee ? `@${t.assignee}` : tr('未分配')}
-              </span>
-            </button>
-          ))}
-          {reviewing.data
-            ?.filter((t) => !data?.approvals.some((a) => a.task_id === t.id))
-            .map((t) => (
-              <button key={`r${t.id}`} className="attention-card" onClick={() => openTask(t.id)}>
-                <span className="eyebrow">{tr('等待验收')}</span>
-                <strong>{t.title}</strong>
-                <span className="small muted">T-{t.id}</span>
-              </button>
-            ))}
-          {inbox.data
-            ?.filter((n) => n.message.kind === 'question')
-            .map((n) => (
-              <button className="attention-card" key={`n${n.id}`} onClick={() => go('inbox')}>
-                <span className="eyebrow">{tr('有人在等你的回复')}</span>
-                <p>{n.message.body}</p>
-                <span className="small muted">@{n.message.author}</span>
-              </button>
-            ))}
-          {(reviewPage > 0 || reviewing.data?.length === 20) && (
-            <div className="pagination">
-              <button disabled={reviewPage === 0} onClick={() => setReviewPage(reviewPage - 1)}>
-                {tr('上一页验收')}
-              </button>
-              <button
-                disabled={reviewing.data?.length !== 20}
-                onClick={() => setReviewPage(reviewPage + 1)}
-              >
-                {tr('下一页验收')}
-              </button>
-            </div>
-          )}
-          {(questionPages.length > 1 || inbox.data?.length === 10) && (
-            <div className="pagination">
-              <button
-                disabled={questionPages.length === 1}
-                onClick={() => setQuestionPages(questionPages.slice(0, -1))}
-              >
-                {tr('较新的提问')}
-              </button>
-              <button
-                disabled={inbox.data?.length !== 10}
-                onClick={() => setQuestionPages([...questionPages, inbox.data?.at(-1)?.id])}
-              >
-                {tr('更早的提问')}
-              </button>
-            </div>
-          )}
-          {!data?.approvals.length &&
-            !data?.attention.length &&
-            !reviewing.data?.length &&
-            !inbox.data?.some((n) => n.message.kind === 'question') && (
-              <div className="all-clear">
-                <strong>{tr('暂时无需介入')}</strong>
-              </div>
-            )}
-        </aside>
+        <AttentionQueue />
       </div>
     </>
   );

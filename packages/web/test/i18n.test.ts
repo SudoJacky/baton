@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import ts from 'typescript';
@@ -43,9 +43,17 @@ describe('interface translations', () => {
       'eventNames',
       'modeNames',
       'sliders',
+      'boardColumns',
+      'actionNames',
+      'queueKinds',
+      'runStates',
+      'outcomes',
+      'taskTabs',
     ]);
     const keys = new Set<string>();
-    for (const file of ['App.tsx', 'board.tsx', 'tasks.tsx', 'messages.tsx', 'tuner.tsx']) {
+    for (const file of readdirSync(new URL('../src', import.meta.url)).filter((name) =>
+      /\.tsx?$/.test(name),
+    )) {
       const source = ts.createSourceFile(
         file,
         readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8'),
@@ -60,7 +68,7 @@ describe('interface translations', () => {
       const visit = (node: ts.Node) => {
         if (ts.isCallExpression(node) && node.expression.getText(source) === 'tr') {
           const key = node.arguments[0];
-          if (key && ts.isStringLiteral(key)) keys.add(key.text);
+          if (key) collect(key);
         }
         if (
           ts.isVariableDeclaration(node) &&

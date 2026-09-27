@@ -21,7 +21,17 @@ function credentials(request: FastifyRequest): string | undefined {
 function parseQuery(query: unknown): Record<string, unknown> {
   const output = { ...(query as Record<string, unknown>) };
   if (output.repository === 'null') output.repository = null;
-  for (const key of ['id', 'parent', 'task_id', 'since', 'before', 'limit', 'offset', 'timeout'])
+  for (const key of [
+    'id',
+    'parent',
+    'depends_on',
+    'task_id',
+    'since',
+    'before',
+    'limit',
+    'offset',
+    'timeout',
+  ])
     if (typeof output[key] === 'string') output[key] = Number(output[key]);
   for (const key of ['mine', 'active_only', 'include_thread', 'unread_only']) {
     if (output[key] === 'true') output[key] = true;
