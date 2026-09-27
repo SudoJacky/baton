@@ -11,6 +11,8 @@ agent-board --config /path/to/agents.yaml --session <返回的UUID> task next --
 
 `join` 返回的 ID 不是秘密，不需要逐 Agent 凭证配置。本机接入密钥由服务初始化并由客户端自动读取。角色约定见 `roles/coder.md`；恢复时复用原 ID，结束协作时调用 `leave`。活动请求不续任务租约。
 
+派发 worker 直接使用 `run_id`，无需 join。派发回执的 `integration.worker_get` 提供可运行命令与 argv；报告目录使用 `evidence_directory`。`agent-board doctor --run-id <id> --json` 检查接入及任务绑定，`agent-board --session <id> doctor --json` 返回恢复待办。单次 CLI 不维持续租，自检会明确提示；应由持续连接的 MCP 或宿主负责 `worker heartbeat`，不能把成功读取任务当作续租已就绪。
+
 需要直接启动一个外部 CLI 时，可选用：
 
 ```sh

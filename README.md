@@ -12,12 +12,12 @@
 
 表中 token 均为精确计数，credits 四舍五入到两位小数。缓存输入单独列出，不重复计入未缓存输入。
 
-| 职责 / 模型 | 模型响应次数 | 未缓存输入 token | 缓存输入 token | 输出 token | 折算 credits |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 规划与协调 / GPT-6 Astra | 499 | 1,614,865 | 54,684,416 | 199,716 | 2,020.47 |
-| 编码 / GPT-6 Sol | 433 | 1,337,862 | 55,582,464 | 208,166 | 396.85 |
-| 独立验收 / GPT-6 Luna | 211 | 909,544 | 18,801,792 | 169,257 | 9.09 |
-| **合计** | **1,143** | **3,862,271** | **129,068,672** | **577,139** | **2,426.41** |
+| 职责 / 模型              | 模型响应次数 | 未缓存输入 token |  缓存输入 token |  输出 token | 折算 credits |
+| ------------------------ | -----------: | ---------------: | --------------: | ----------: | -----------: |
+| 规划与协调 / GPT-6 Astra |          499 |        1,614,865 |      54,684,416 |     199,716 |     2,020.47 |
+| 编码 / GPT-6 Sol         |          433 |        1,337,862 |      55,582,464 |     208,166 |       396.85 |
+| 独立验收 / GPT-6 Luna    |          211 |          909,544 |      18,801,792 |     169,257 |         9.09 |
+| **合计**                 |    **1,143** |    **3,862,271** | **129,068,672** | **577,139** | **2,426.41** |
 
 总计 **133,508,082 token**，其中输入缓存命中率为 **97.1%**。这些数量包含多次请求重复携带的上下文，并非同等数量的新增内容。输出已包含推理 token，不再次相加。
 
@@ -156,7 +156,7 @@ $baton 由你担任 planner，将当前需求写入看板并调度子 Agent：co
 
 Dashboard 的任务详情顶部提供“取消任务”：填写原因并确认后，保留任务与讨论历史，释放该任务的写入锁，并移除它的待审批申请和异常待办。取消前请确认执行者已停止；取消不会修改仓库文件，也不会自动取消关联任务；有未结束子任务的计划需先处理子任务。旧任务取消后可正常创建新任务，在看板勾选“显示已结束”可查看取消记录。已完成或已取消的任务不能再次取消或重新开启。
 
-默认 MCP 提供 planner 的规划/派发工具，以及 worker 的 `get_task`、`post_message`、`submit`、`review` 四个常用工具。完整手动工具仍可通过全局参数 `--profile full` 使用，CLI 保留全部操作。
+默认 MCP 提供 planner 的规划/派发工具，以及 worker 的 `get_task`、`post_message`、`submit`、`review` 四个常用工具和证据汇总工具 `prepare_evidence`。完整手动工具仍可通过全局参数 `--profile full` 使用，CLI 保留全部操作。CLI 帮助会列出枚举合法值；`worker review --help` 包含通过与退回示例，`verdict` 只接受 `approve` 或 `changes_requested`。
 
 ```text
 planner: join → create_task(type=plan) → create_task(parent_id=计划ID, ...)
@@ -172,6 +172,64 @@ planner: 返工则重新派发原 coder；全部完成后 complete_plan
 `dispatch_task` 原子准备身份、认领、状态和锁，**不启动模型**；主 Agent 使用宿主提供的子 Agent 工具启动执行者，传入 run_id 和任务上下文。一个共享 MCP 可同时承载所有身份，无需逐会话配置。worker 不再自己 join、续租、操作收件箱或单独勾选标准；验收结论与勾选由服务端原子写入。
 
 每轮派发有独立 run_id，完成后不能再用于修改；相同活跃派发重试返回同一 ID，主 Agent不能据此重复启动 worker。MCP 为活跃 assignment 自动续租，连接中断后到期保留目录和锁，通知协调者恢复。实际 worker 崩溃需主 Agent 确认停止后调用 stop_worker，不能把 MCP 连接误当作模型存活证明。
+
+### 交接回执与恢复
+
+worker 回执提供 `handoff.summary`、`next_action`（动作、负责身份、原因）、当前 `blockers` 和仓库锁用途。编码提交成功后，`state=completed` 表示本轮结束，`task.status=in_review` 表示等待独立验收；`submitted_commit_sha` 固定记录该实现 run 的提交，返工不会覆盖它。`task.submitted_commit_sha` 是任务最近一次提交；tester 继续使用派发时固定的 `commit_sha` 验收。旧数据库中无法可靠归属到 run 的历史 SHA 保留为空。
+
+写操作回执中的 `notifications` 是最近五条未读通知，带任务、已知的 run、发生时间及收件状态，明确标记 `blocks_current_operation=false`。`state` 表示通知处理状态，不证明历史问题仍存在；当前阻塞以操作错误和 `handoff.blockers` 为准。兼容字段 `urgent` 返回 `null`。完整通知历史仍通过 inbox 查询。
+
+恢复 planner 会话时，`whoami` 返回 `pending`：相关未完成任务、活跃 `run_id` 和下一步动作。宿主需核对已有执行者再启动或恢复；Baton 不从租约推断模型存活。
+
+### 按 run 保存证据
+
+派发会创建仓库外的 `evidence_directory`，coder、tester 和每轮返工各用自己的目录。默认位于用户目录 `~/.agent-board/evidence/<看板标识>/T-<id>/<run_id>`；服务端可通过 `--evidence-directory <绝对路径>` 指定根目录，根目录应在代码仓库外。此路径位于 Baton 服务所在机器，目录隔离用于避免误覆盖，不提供进程权限隔离。
+
+在任务仓库中执行检查，输出目录使用派发结果：
+
+```sh
+agent-board evidence --output-dir <evidence_directory> --scope "单元测试；未覆盖真实模型和桌面端" -- node --test
+```
+
+也可运行 [脚本模板](templates/run-check.ts)，使用相同的 `--output-dir`、`--scope` 和命令参数。每次检查创建独立子目录，保存输出日志与 `evidence.json`，保留真实退出码。全部检查结束后，自动汇总本轮证据并检查清单：
+
+```sh
+agent-board worker evidence --run-id "<run-id>" --json
+agent-board worker submit --run-id "<run-id>" --summary "实现及自测结果" --commit-sha "<full-sha>" --evidence-manifest "<返回的 evidence_manifest 路径>"
+```
+
+MCP 对应 `prepare_evidence({run_id})`，再将返回的 `evidence_manifest` 传给 `submit` 或 `review`。汇总会读取本轮 `check-*/evidence.json`，保留失败检查，返回路径、scope、命令、退出码、SHA-256 和字节数；额外截图或报告可通过 `prepare_evidence` 的 `evidence:[{path,scope}]` 参数补入。CLI 可用 `--data-file` 传复杂参数。缺失或格式错误的清单、缺失文件、重复路径和跨 run 文件都会报错，不跳过失败记录。
+
+每次汇总生成独立的 `manifest-<UUID>.json` 快照，不覆盖旧清单。提交时重新检查 run 归属、文件内容与清单哈希；新增或修改证据后应重新汇总。汇总不会提交任务、勾选标准或判断检查是否通过。也可继续将 `evidence` 数组直接随 `submit` 或 `review` 提交：
+
+```json
+{
+  "run_id": "本轮 UUID",
+  "summary": "实现及自测结果",
+  "commit_sha": "完整 SHA",
+  "evidence": [
+    {
+      "path": "本轮目录中的报告路径",
+      "command": ["node", "--test"],
+      "exit_code": 0,
+      "scope": "单元测试；未覆盖真实模型和桌面端"
+    }
+  ]
+}
+```
+
+`path` 可为本轮目录内的绝对或相对文件路径，`scope` 必填；命令与退出码在适用时提供。服务端校验目录归属（包括链接解析后的目标），计算文件 SHA-256 和字节数，并绑定 run 与提交 SHA。文件不可读或越界会拒绝本次提交，保留任务与锁。命令、退出码、验证边界是执行者报告；哈希只记录登记时的文件内容，不代表检查已被服务端独立重跑。`get_task` 的 `task.evidence` 汇总历轮证据，本轮 `evidence` 保留自己的记录。文件由本机保存，不自动上传或清理。
+
+### 接入自检
+
+MCP 提供接入工具 `doctor({run_id})` 或 `doctor({session_id})`；CLI 对应：
+
+```sh
+agent-board --config /path/to/agents.yaml doctor --run-id <run_id> --json
+agent-board --config /path/to/agents.yaml --session <session_id> doctor --json
+```
+
+自检报告连接方式、身份、任务仓库与当前 MCP 的续租管理情况，包含最近一次成功续租及错误。自检不会加入身份、启动执行者或接管续租。没有 ID 时只检查服务连通性；CLI 返回退出码 1 表示检查未全部就绪。单次 CLI 无法证明另一个 MCP 正在管理租约，会明确提示这一限制。MCP/CLI 派发回执的 `integration.worker_get` 同时提供可直接运行的命令及结构化 `argv`，使用实际 Node、客户端、配置路径和服务地址，不包含接入密钥。
 
 将临时输入文件放到忽略目录，或写到仓库外。代码任务提交要求：完整 commit SHA、SHA 等于任务仓库 HEAD、工作目录干净（含未跟踪文件）、仍持有该任务写入锁。任一检查失败都会保留原状态与锁。
 

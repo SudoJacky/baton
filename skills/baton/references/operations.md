@@ -4,7 +4,7 @@
 
 默认 `approval_mode=plan`：先创建草稿 plan 和代码子任务，再申请计划发布；实现任务须关联计划，批准前不能开工，批准后范围锁定。下文逐任务 gate 示例仅用于 `approval_mode=custom`。`settings.gates` 在 plan 模式不参与判断，`merge_approval` 控制合入任务是否需要额外的发布审批。不要代人修改策略。
 
-CLI 也有 `task dispatch <id> --handle coder --mode implement`、`task complete-plan <id>`、`worker get/message/submit/review --run-id <id>` 和 `worker stop --run-id <id>`。只有 MCP 会为派发的 worker 自动续租；单次 CLI 命令不创建后台续租器。
+CLI 也有 `task dispatch <id> --handle coder --mode implement`、`task complete-plan <id>`、`worker get/message/evidence/submit/review --run-id <id>` 和 `worker stop --run-id <id>`。`worker evidence` 自动汇总本轮检查并展示清单；将返回的路径通过 `--evidence-manifest` 传给 submit/review。`worker review --verdict` 只接受 `approve` 或 `changes_requested`，`--help` 列出合法值和完整示例。只有 MCP 会为派发的 worker 自动续租；单次 CLI 命令不创建后台续租器。
 
 ## 入口与返回值
 

@@ -40,7 +40,9 @@ async function fixture() {
   execFileSync('git', ['init', '--quiet', directory], { windowsHide: true });
   const configFile = join(directory, 'agents.yaml');
   const agentToken = await ensureLocalAccess(configFile);
-  const board = new Board({ database: ':memory:', config, agentToken });
+  const evidenceDirectory = await mkdtemp(join(tmpdir(), 'baton-client-evidence-'));
+  cleanup.push(() => rm(evidenceDirectory, { recursive: true, force: true }));
+  const board = new Board({ database: ':memory:', config, agentToken, evidenceDirectory });
   const app = await createApp(board);
   const address = await app.listen({ host: '127.0.0.1', port: 0 });
   cleanup.push(async () => {
@@ -204,6 +206,154 @@ it('the optional wrapper passes a non-secret session ID and preserves the child 
   expect(data).toMatchObject({ handle: 'tester', status: 'online', has_token: false });
   expect(() => f.board.authenticate(f.agentToken, data.session_id)).toThrow();
 });
+
+it('shows enum choices and runnable review examples before connecting to a board', async () => {
+  const f = await fixture();
+  const help = await f.cli(['worker', 'review', '--help']);
+  expect(help.code).toBe(0);
+  expect(help.stdout).toContain('--verdict <approve|changes_requested>');
+  expect(help.stdout).toContain('agent-board worker review --run-id');
+  expect(help.stdout).toContain('--criteria-passed "[101,102]"');
+  expect(
+    help.stdout.split('\n').find((line) => line.includes('--verdict changes_requested')),
+  ).toContain('--commit-sha "<full-sha>"');
+  expect(help.stdout).toContain('agent-board worker evidence');
+  expect((await f.cli(['task', 'dispatch', '--help'])).stdout).toContain(
+    '--mode <implement|review>',
+  );
+  const invalid = await f.cli([
+    '--url',
+    'http://127.0.0.1:1',
+    'worker',
+    'review',
+    '--verdict',
+    'approved',
+  ]);
+  expect(invalid.code).toBe(1);
+  expect(invalid.stderr).toContain('Allowed choices are approve, changes_requested');
+});
+
+it('returns runnable handoff commands and captures isolated evidence while reporting CLI lease limits', async () => {
+  const f = await fixture();
+  const task = (
+    await f.client('dax').call<Task>('create_task', { title: 'Evidence helper', type: 'test' })
+  ).data;
+  const dispatched = await f.cli([
+    '--session',
+    f.client('planner').sessionId!,
+    'task',
+    'dispatch',
+    String(task.id),
+    '--handle',
+    'coder',
+    '--mode',
+    'implement',
+    '--json',
+  ]);
+  expect(dispatched.code, dispatched.stderr).toBe(0);
+  const run = JSON.parse(dispatched.stdout).data as WorkerAssignment & {
+    integration: {
+      worker_get: { argv: string[]; command: string };
+      lease: { managed_here: boolean };
+    };
+  };
+  expect(run.integration.lease.managed_here).toBe(false);
+  const get = await f.cli(run.integration.worker_get.argv.slice(2));
+  expect(get.code, get.stderr).toBe(0);
+  expect(JSON.parse(get.stdout).data.run_id).toBe(run.run_id);
+  const doctor = await f.cli(['doctor', '--run-id', run.run_id, '--json']);
+  expect(doctor.code).toBe(1);
+  expect(JSON.parse(doctor.stdout).data.checks).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        name: 'identity',
+        status: 'ok',
+        detail: expect.objectContaining({ handle: 'coder' }),
+      }),
+      expect.objectContaining({ name: 'lease', status: 'attention' }),
+    ]),
+  );
+  const check = await f.cli([
+    '--json',
+    'evidence',
+    '--output-dir',
+    run.evidence_directory,
+    '--scope',
+    'Command failure only; no UI coverage',
+    '--',
+    process.execPath,
+    '-e',
+    'console.log("check output"); process.exitCode=7;',
+  ]);
+  expect(check.code, check.stderr).toBe(7);
+  const capture = JSON.parse(check.stdout);
+  expect(capture.evidence[0]).toMatchObject({
+    exit_code: 7,
+    scope: 'Command failure only; no UI coverage',
+  });
+  expect(await readFile(capture.evidence[0].path, 'utf8')).toContain('check output');
+  const secondCheck = await f.cli([
+    '--json',
+    'evidence',
+    '--output-dir',
+    run.evidence_directory,
+    '--scope',
+    'Second independent check',
+    '--',
+    process.execPath,
+    '-e',
+    'console.log("second check");',
+  ]);
+  expect(secondCheck.code, secondCheck.stderr).toBe(0);
+  const preview = await f.cli(['worker', 'evidence', '--run-id', run.run_id, '--json']);
+  expect(preview.code, preview.stderr).toBe(0);
+  const manifest = JSON.parse(preview.stdout).data;
+  expect(manifest.evidence).toHaveLength(2);
+  expect(manifest.evidence).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ exit_code: 7, scope: capture.evidence[0].scope }),
+    ]),
+  );
+  const submission = join(f.directory, 'evidence-submit.json');
+  await writeFile(
+    submission,
+    JSON.stringify({
+      summary: 'Captured a failing command for independent review',
+      evidence_manifest: manifest.evidence_manifest,
+    }),
+  );
+  const accepted = await f.cli([
+    'worker',
+    'submit',
+    '--run-id',
+    run.run_id,
+    '--data-file',
+    submission,
+    '--json',
+  ]);
+  expect(accepted.code, accepted.stderr).toBe(0);
+  expect(JSON.parse(accepted.stdout).data.evidence).toHaveLength(2);
+  expect(JSON.parse(accepted.stdout).data.evidence).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        run_id: run.run_id,
+        exit_code: 7,
+        sha256: expect.any(String),
+      }),
+    ]),
+  );
+  const restored = await f.cli(['--session', f.client('planner').sessionId!, 'doctor', '--json']);
+  expect(restored.code, restored.stderr).toBe(0);
+  expect(JSON.parse(restored.stdout).data.pending).toContainEqual(
+    expect.objectContaining({
+      task_id: task.id,
+      handoff: expect.objectContaining({
+        next_action: expect.objectContaining({ action: 'dispatch_review' }),
+      }),
+    }),
+  );
+  expect(dispatched.stdout + doctor.stdout + restored.stdout).not.toContain(f.agentToken);
+});
 async function connectMcp(
   f: Awaited<ReturnType<typeof fixture>>,
   profile: 'full' | 'workflow' = 'full',
@@ -256,7 +406,14 @@ it('runs the four worker tools over one shared MCP with automatic leases and rea
   const mcp = await connectMcp(f, 'workflow');
   const names = (await mcp.listTools()).tools.map((t) => t.name);
   expect(names).toEqual(
-    expect.arrayContaining(['get_task', 'post_message', 'submit', 'review', 'dispatch_task']),
+    expect.arrayContaining([
+      'get_task',
+      'post_message',
+      'prepare_evidence',
+      'submit',
+      'review',
+      'dispatch_task',
+    ]),
   );
   for (const name of [
     'claim_task',
@@ -299,6 +456,31 @@ it('runs the four worker tools over one shared MCP with automatic leases and rea
     mode: 'implement',
     handle: 'coder',
   })) as WorkerAssignment;
+  expect(await call('doctor', { run_id: worker.run_id })).toMatchObject({
+    ready: true,
+    checks: expect.arrayContaining([
+      expect.objectContaining({
+        name: 'lease',
+        status: 'ok',
+        detail: expect.objectContaining({ managed_here: true }),
+      }),
+    ]),
+  });
+  const inspectionOnly = await connectMcp(f, 'workflow');
+  expect(
+    toolData(
+      await inspectionOnly.callTool({ name: 'doctor', arguments: { run_id: worker.run_id } }),
+    ),
+  ).toMatchObject({
+    ready: false,
+    checks: expect.arrayContaining([
+      expect.objectContaining({
+        name: 'lease',
+        status: 'attention',
+        detail: expect.objectContaining({ managed_here: false }),
+      }),
+    ]),
+  });
   const events = f.board.eventCursor();
   const until = Date.now() + 3700;
   while (Date.now() < until) {
@@ -308,6 +490,12 @@ it('runs the four worker tools over one shared MCP with automatic leases and rea
   const live = (await call('get_task', { run_id: worker.run_id })) as WorkerAssignment;
   expect(live.task).toMatchObject({ status: 'in_progress', lease_expired_at: null });
   expect(f.board.eventCursor()).toBe(events);
+  const health = (await call('doctor', { run_id: worker.run_id })) as {
+    checks: { name: string; detail: { last_success_at?: string } }[];
+  };
+  expect(health.checks.find((c) => c.name === 'lease')!.detail.last_success_at).toEqual(
+    expect.any(String),
+  );
   await call('post_message', { run_id: worker.run_id, body: 'Implementation and checks complete' });
   expect(
     (
@@ -341,14 +529,28 @@ it('runs the four worker tools over one shared MCP with automatic leases and rea
   expect(dirty.isError).toBe(true);
   expect(JSON.stringify(dirty.content)).toContain('dirty_worktree');
   await writeFile(join(f.directory, 'code.ts'), source);
+  await writeFile(
+    join(reviewer.evidence_directory, 'independent-review.txt'),
+    'Read code.ts and verified answer = 42',
+  );
+  const prepared = (await call('prepare_evidence', {
+    run_id: reviewer.run_id,
+    evidence: [{ path: 'independent-review.txt', scope: 'Source inspection and fixed HEAD check' }],
+  })) as { evidence_manifest: string };
   const reviewed = (await call('review', {
     run_id: reviewer.run_id,
     verdict: 'approve',
     comments: 'Read code.ts; export is 42; HEAD and clean status verified',
     commit_sha: sha,
     criteria_passed: reviewer.task.acceptance_criteria.map((c) => c.id),
+    evidence_manifest: prepared.evidence_manifest,
   })) as WorkerAssignment;
   expect(reviewed.task.status).toBe('done');
+  expect(reviewed.evidence[0]).toMatchObject({
+    run_id: reviewer.run_id,
+    commit_sha: sha,
+    sha256: expect.any(String),
+  });
   expect((await f.client('dax').call<unknown[]>('list_approvals', {})).data).toHaveLength(0);
   expect(
     (

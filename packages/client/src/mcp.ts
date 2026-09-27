@@ -8,6 +8,8 @@ import { operations, schemas, type Operation, type WorkerAssignment } from '@bat
 import { ApiError } from './api.js';
 import { localClient } from './identity.js';
 import { WorkerLeases } from './worker-leases.js';
+import { diagnose, withIntegration } from './integration.js';
+import type { Envelope } from '@baton/shared';
 
 async function main() {
   const { values } = parseArgs({
@@ -41,8 +43,13 @@ async function main() {
     'get_task',
     'post_message',
   ]);
-  const present = (result: unknown): CallToolResult => ({
-    content: [{ type: 'text', text: JSON.stringify(result) }],
+  const present = (result: Envelope): CallToolResult => ({
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(withIntegration(result, values.config, client, leases)),
+      },
+    ],
   });
   const failed = (error: unknown): CallToolResult => ({
     content: [
@@ -67,6 +74,24 @@ async function main() {
     )
       leases.track(result.data as WorkerAssignment);
   };
+  server.registerTool(
+    'doctor',
+    {
+      description:
+        'Integration self-check: inspect connection, identity, task repository and lease management. Does not join or start workers.',
+      inputSchema: z
+        .object({ run_id: z.string().uuid().optional(), session_id: z.string().uuid().optional() })
+        .strict(),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async (input) => {
+      try {
+        return present({ data: await diagnose(client, input, leases) });
+      } catch (error) {
+        return failed(error);
+      }
+    },
+  );
   for (const name of Object.keys(operations) as Operation[]) {
     const route = operations[name];
     if (
@@ -149,6 +174,7 @@ async function main() {
     );
   }
   for (const [name, operation] of [
+    ['prepare_evidence', 'worker_prepare_evidence'],
     ['submit', 'worker_submit'],
     ['review', 'worker_review'],
   ] as const)

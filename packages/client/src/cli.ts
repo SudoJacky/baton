@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { inspect } from 'node:util';
@@ -11,6 +11,8 @@ import { z } from 'zod';
 import { operations, schemas, type BoardConfig, type Mention, type Operation } from '@baton/shared';
 import { ensureLocalAccess, migrateConfig } from '@baton/shared/local';
 import { ApiError } from './api.js';
+import { diagnose, withIntegration } from './integration.js';
+import { captureEvidence } from './evidence-command.js';
 import {
   assertIdentity,
   clientFromOptions,
@@ -63,8 +65,13 @@ const inputData = async (options: Options): Promise<Record<string, unknown>> => 
 };
 async function execute(operation: Operation, input: Record<string, unknown>, options: Options) {
   if (operation.startsWith('worker_')) {
+    const client = await localClient(options);
     print(
-      await (await localClient(options)).call(operation, schemas[operation].parse(input)),
+      withIntegration(
+        await client.call(operation, schemas[operation].parse(input)),
+        options.config,
+        client,
+      ),
       options,
     );
     return;
@@ -77,7 +84,14 @@ async function execute(operation: Operation, input: Record<string, unknown>, opt
   const { client, handle, joined } = await clientFromOptions(options);
   try {
     await assertIdentity(client, handle);
-    print(await client.call(operation, schemas[operation].parse(input)), options);
+    print(
+      withIntegration(
+        await client.call(operation, schemas[operation].parse(input)),
+        options.config,
+        client,
+      ),
+      options,
+    );
   } finally {
     if (joined && operation !== 'leave') await cleanupSession(client);
   }
@@ -92,6 +106,34 @@ async function cleanupSession(client: import('./api.js').BoardClient) {
   }
 }
 const groups = new Map<string, Command>();
+program
+  .command('doctor')
+  .description(
+    'Check connection, identity, task repository and lease management without changing them.',
+  )
+  .option('--run-id <id>', 'Worker assignment to inspect')
+  .option('--json')
+  .action(async (_opts, command: Command) => {
+    const options = command.optsWithGlobals<Options>();
+    const result = await diagnose(await localClient(options), {
+      run_id: options.runId === undefined ? undefined : z.string().uuid().parse(options.runId),
+      session_id: options.session ?? (process.env.BOARD_SESSION_ID || undefined),
+    });
+    print({ data: result }, options);
+    if (!result.ready) process.exitCode = 1;
+  });
+program
+  .command('evidence')
+  .description('Run one check and record its output, command, exit code and verification scope.')
+  .requiredOption('--output-dir <path>', 'Run evidence_directory from get_task')
+  .requiredOption('--scope <text>', 'What this check verifies and what it does not cover')
+  .argument('<command...>')
+  .action(async (args: string[], _opts, command: Command) => {
+    const options = command.optsWithGlobals<Options>();
+    const result = await captureEvidence(String(options.outputDir), String(options.scope), args);
+    print(result, options);
+    process.exitCode = result.exit_code ?? 1;
+  });
 function group(name: string): Command {
   if (!groups.has(name)) groups.set(name, program.command(name));
   return groups.get(name)!;
@@ -101,6 +143,7 @@ const commands: Record<Operation, string> = {
   complete_plan: 'task complete-plan',
   stop_worker: 'worker stop',
   worker_get_task: 'worker get',
+  worker_prepare_evidence: 'worker evidence',
   worker_post_message: 'worker message',
   worker_submit: 'worker submit',
   worker_review: 'worker review',
@@ -139,7 +182,13 @@ const commands: Record<Operation, string> = {
   get_overview: 'overview',
   list_decisions: 'message decisions',
 };
-type JsonProperty = { type?: string; anyOf?: { type?: string }[]; description?: string };
+type JsonProperty = {
+  type?: string;
+  anyOf?: JsonProperty[];
+  description?: string;
+  enum?: string[];
+  const?: string;
+};
 for (const operation of Object.keys(commands) as Operation[]) {
   const parts = commands[operation].split(' ');
   let command: Command;
@@ -161,7 +210,12 @@ for (const operation of Object.keys(commands) as Operation[]) {
   for (const [name, spec] of Object.entries(properties)) {
     if (name === 'id') continue;
     const flag = name.replaceAll('_', '-');
-    if (spec.type === 'boolean')
+    const choices = spec.enum ?? (spec.const === undefined ? undefined : [spec.const]);
+    if (choices)
+      command.addOption(
+        new Option(`--${flag} <${choices.join('|')}>`, spec.description ?? name).choices(choices),
+      );
+    else if (spec.type === 'boolean')
       command.option(`--${flag} [boolean]`, name, (value) =>
         value === 'true' ? true : value === 'false' ? false : value,
       );
@@ -172,6 +226,28 @@ for (const operation of Object.keys(commands) as Operation[]) {
         return value;
       });
   }
+  if (operation === 'worker_review')
+    command.addHelpText(
+      'after',
+      `
+Examples (replace run ID, full SHA and criterion IDs with values from worker get):
+  agent-board worker review --run-id "<run-id>" --verdict approve --comments "Verified all criteria" --commit-sha "<full-sha>" --criteria-passed "[101,102]" --evidence-manifest "<manifest-path>"
+  agent-board worker review --run-id "<run-id>" --verdict changes_requested --comments "Criterion 101 fails; see evidence" --commit-sha "<full-sha>" --evidence-manifest "<manifest-path>"
+
+Prepare and inspect evidence first:
+  agent-board worker evidence --run-id "<run-id>" --json
+Use the returned evidence_manifest path. Use --data-file for complex JSON parameters.
+`,
+    );
+  if (operation === 'worker_prepare_evidence' || operation === 'worker_submit')
+    command.addHelpText(
+      'after',
+      `
+Examples:
+  agent-board worker evidence --run-id "<run-id>" --json
+  agent-board worker submit --run-id "<run-id>" --summary "Implementation verified" --commit-sha "<full-sha>" --evidence-manifest "<manifest-path>"
+`,
+    );
   command.action(async (...args: unknown[]) => {
     const current = args.at(-1) as Command;
     const options = current.optsWithGlobals<Options>();

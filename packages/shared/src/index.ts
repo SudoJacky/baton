@@ -36,6 +36,22 @@ export const artifactSchema = z
     label: z.string().max(200).optional(),
   })
   .strict();
+export const evidenceSchema = z
+  .object({
+    path: z.string().trim().min(1).max(4096),
+    command: z.array(z.string()).min(1).max(200).optional(),
+    exit_code: z.number().int().optional(),
+    scope: text,
+  })
+  .strict();
+export type EvidenceInput = z.infer<typeof evidenceSchema>;
+export interface Evidence extends EvidenceInput {
+  run_id: string;
+  commit_sha: string | null;
+  sha256: string;
+  size_bytes: number;
+  recorded_at: string;
+}
 export const gateSchema = z
   .object({ from: statusSchema, to: statusSchema, types: z.array(taskTypeSchema).min(1) })
   .strict();
@@ -132,6 +148,12 @@ export const schemas = {
     })
     .strict(),
   worker_get_task: z.object({ run_id: z.string().uuid() }).strict(),
+  worker_prepare_evidence: z
+    .object({
+      run_id: z.string().uuid(),
+      evidence: z.array(evidenceSchema).max(100).default([]),
+    })
+    .strict(),
   worker_heartbeat: z.object({ run_id: z.string().uuid() }).strict(),
   worker_post_message: z
     .object({
@@ -150,6 +172,8 @@ export const schemas = {
         .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i)
         .optional(),
       artifacts: z.array(artifactSchema).max(99).default([]),
+      evidence: z.array(evidenceSchema).max(100).default([]),
+      evidence_manifest: z.string().trim().min(1).max(4096).optional(),
     })
     .strict(),
   worker_review: z
@@ -162,6 +186,8 @@ export const schemas = {
         .string()
         .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i)
         .optional(),
+      evidence: z.array(evidenceSchema).max(100).default([]),
+      evidence_manifest: z.string().trim().min(1).max(4096).optional(),
     })
     .strict(),
   create_task: z
@@ -349,6 +375,12 @@ export const operations: Record<Operation, Route> = {
     path: '/workers/:run_id',
     description: 'Read the assigned task, discussion, review SHA and worker state.',
   },
+  worker_prepare_evidence: {
+    method: 'POST',
+    path: '/workers/:run_id/evidence',
+    description:
+      "Collect this run's captured checks plus optional evidence files, validate and display the list, and create an evidence_manifest snapshot for submit/review. Does not submit or change task state.",
+  },
   worker_heartbeat: {
     method: 'POST',
     path: '/workers/:run_id/heartbeat',
@@ -364,13 +396,13 @@ export const operations: Record<Operation, Route> = {
     method: 'POST',
     path: '/workers/:run_id/submit',
     description:
-      'Submit the assigned implementation with summary and full commit_sha. Server handles state and handoff.',
+      'Submit the assigned implementation with summary and full commit_sha. Attach evidence or an evidence_manifest from prepare_evidence. Server handles state and handoff.',
   },
   worker_review: {
     method: 'POST',
     path: '/workers/:run_id/review',
     description:
-      'Independently review the assigned submission. Approve only with every verified criterion ID in criteria_passed; otherwise request changes with evidence.',
+      'Independently review the assigned submission. verdict must be approve or changes_requested. Approve only with every verified criterion ID in criteria_passed; attach evidence or an evidence_manifest from prepare_evidence.',
   },
   join: {
     method: 'POST',
@@ -635,6 +667,31 @@ export interface Task extends TaskSummary {
   artifacts: Artifact[];
   labels: string[];
   thread?: Message[];
+  submitted_commit_sha: string | null;
+  evidence: Evidence[];
+  handoff?: Handoff;
+}
+export interface Handoff {
+  summary: string;
+  next_action: {
+    action:
+      | 'inspect_task'
+      | 'none'
+      | 'resolve_blocker'
+      | 'wait_for_approval'
+      | 'review'
+      | 'implement'
+      | 'dispatch_review'
+      | 'inspect_and_resume'
+      | 'dispatch_implement'
+      | 'complete_plan'
+      | 'follow_children'
+      | 'request_approval';
+    actor: string;
+    reason: string;
+  };
+  blockers: { code: string; task_id: number; reason: string }[];
+  lock: (WriteLock & { purpose: string }) | null;
 }
 export interface WorkerAssignment {
   run_id: string;
@@ -643,7 +700,16 @@ export interface WorkerAssignment {
   handle: string;
   task: Task;
   commit_sha: string | null;
+  submitted_commit_sha: string | null;
+  evidence_directory: string;
+  evidence: Evidence[];
+  handoff: Handoff;
   heartbeat_after_ms: number;
+}
+export interface PreparedEvidence {
+  run_id: string;
+  evidence_manifest: string;
+  evidence: Evidence[];
 }
 export interface Message {
   id: number;
@@ -655,6 +721,7 @@ export interface Message {
   body: string;
   reply_to: number | null;
   created_at: string;
+  run_id?: string | null;
 }
 export interface Mention {
   id: number;
@@ -707,6 +774,7 @@ export interface Identity {
   participant: Participant;
   tasks: TaskSummary[];
   unread: number;
+  pending?: { task_id: number; run_id: string | null; handoff: Handoff }[];
 }
 export interface AgentSession extends Identity {
   session_id: string;
@@ -714,7 +782,18 @@ export interface AgentSession extends Identity {
 export interface Envelope<T = unknown> {
   data: T;
   unread?: number;
-  urgent?: { id: number; body: string; kind: string } | null;
+  notifications?: {
+    id: number;
+    body: string;
+    kind: string;
+    task_id: number | null;
+    run_id: string | null;
+    created_at: string;
+    state: Mention['state'];
+    blocks_current_operation: false;
+  }[];
+  /** Kept as null for older clients; current blockers are in handoff.blockers. */
+  urgent?: null;
 }
 export interface ApiErrorBody {
   error: { code: string; message: string; next: string; details?: unknown };

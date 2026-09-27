@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import type { SQLInputValue } from 'node:sqlite';
 import {
   operations,
@@ -30,10 +33,14 @@ import {
   type TaskSummary,
   type WriteLock,
   type WorkerAssignment,
+  type Evidence,
+  type Handoff,
+  type PreparedEvidence,
 } from '@baton/shared';
 import { Store } from './database.js';
 import { requireCondition as check } from './errors.js';
 import { resolveRepository, verifyCommit } from './git.js';
+import { insideDirectory, prepareEvidence, submissionEvidence } from './evidence.js';
 
 type ParticipantRow = Omit<Participant, 'frozen'> & { frozen: number };
 type TaskRow = Omit<TaskSummary, 'frozen' | 'writes_code' | 'workflow_plan'> & {
@@ -53,6 +60,9 @@ type WorkerRun = {
   mode: WorkerAssignment['mode'];
   state: WorkerAssignment['state'];
   commit_sha: string | null;
+  submitted_commit_sha: string | null;
+  evidence_directory: string | null;
+  evidence: string;
   lease_until: string;
   created_at: string;
 };
@@ -65,6 +75,7 @@ export const hashToken = (token: string) => createHash('sha256').update(token).d
 export class Board {
   readonly changes = new EventEmitter();
   readonly store: Store;
+  private readonly evidenceRoot: string;
   constructor(
     private readonly options: {
       database: string;
@@ -73,9 +84,21 @@ export class Board {
       now?: () => number;
       verifyCommit?: (repository: string, sha: string) => void | Promise<void>;
       resolveRepository?: (repository: string) => Promise<string>;
+      evidenceDirectory?: string;
     },
   ) {
     this.store = new Store(options.database);
+    this.evidenceRoot = resolve(
+      options.evidenceDirectory ??
+        join(
+          options.database === ':memory:' ? tmpdir() : homedir(),
+          '.agent-board',
+          'evidence',
+          options.database === ':memory:'
+            ? randomUUID()
+            : hashToken(resolve(options.database)).slice(0, 16),
+        ),
+    );
     this.changes.setMaxListeners(0);
     this.store.transaction(() => {
       // Revoke legacy credentials and reconcile configured identities. The old column is
@@ -443,6 +466,12 @@ export class Board {
         'SELECT id,kind,ref,label,created_by,created_at FROM artifacts WHERE task_id=? ORDER BY id',
         id,
       ),
+      submitted_commit_sha: this.submissionSha(id),
+      evidence: this.store
+        .all<{
+          evidence: string;
+        }>('SELECT evidence FROM worker_runs WHERE task_id=? ORDER BY created_at,id', id)
+        .flatMap((r) => JSON.parse(r.evidence) as Evidence[]),
       labels: this.store
         .all<{ label: string }>('SELECT label FROM labels WHERE task_id=? ORDER BY label', id)
         .map((l) => l.label),
@@ -888,9 +917,226 @@ export class Board {
       state: run.state,
       handle: run.handle,
       task,
-      commit_sha: run.commit_sha,
+      commit_sha: run.mode === 'review' ? run.commit_sha : run.submitted_commit_sha,
+      submitted_commit_sha: run.submitted_commit_sha,
+      evidence_directory: run.evidence_directory ?? this.evidencePath(run.task_id, run.id),
+      evidence: JSON.parse(run.evidence) as Evidence[],
+      handoff: this.handoff(task),
       heartbeat_after_ms: Math.max(100, Math.min(10000, this.settings().lease_minutes * 20000)),
     };
+  }
+  private evidencePath(taskId: number, runId: string): string {
+    return join(this.evidenceRoot, `T-${taskId}`, runId);
+  }
+  private prepareEvidenceDirectory(run: WorkerRun, task: Task): void {
+    const path = run.evidence_directory ?? this.evidencePath(task.id, run.id);
+    check(
+      !task.repository || (!insideDirectory(task.repository, path) && task.repository !== path),
+      'evidence_in_repository',
+      'The evidence directory must be outside the task repository.',
+      'Configure an evidence directory outside the working tree.',
+    );
+    mkdirSync(path, { recursive: true });
+    const canonical = realpathSync(path);
+    check(
+      !task.repository ||
+        (!insideDirectory(task.repository, canonical) && task.repository !== canonical),
+      'evidence_in_repository',
+      'The evidence directory resolves inside the task repository.',
+      'Configure an evidence directory outside the working tree.',
+    );
+    this.store.run('UPDATE worker_runs SET evidence_directory=? WHERE id=?', canonical, run.id);
+  }
+  private handoff(task: Task): Handoff {
+    const active = this.store.get<WorkerRun>(
+      "SELECT * FROM worker_runs WHERE task_id=? AND state='active'",
+      task.id,
+    );
+    const latest =
+      active ??
+      this.store.get<WorkerRun>(
+        'SELECT * FROM worker_runs WHERE task_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1',
+        task.id,
+      );
+    const coordinator = latest?.coordinator ?? task.creator;
+    const workerHandle = active?.handle ?? task.assignee;
+    const worker = workerHandle
+      ? this.store.get<{ frozen: number; enabled: number }>(
+          'SELECT frozen,enabled FROM participants WHERE handle=?',
+          workerHandle,
+        )
+      : undefined;
+    const lock = this.taskLock(task);
+    const result: Handoff = {
+      summary: `T-${task.id}: ${task.status}`,
+      next_action: {
+        action: 'inspect_task',
+        actor: coordinator,
+        reason: 'Read the task before proceeding.',
+      },
+      blockers: [],
+      lock:
+        lock.task_id === task.id
+          ? {
+              ...lock,
+              purpose:
+                task.status === 'in_review'
+                  ? '本任务保留仓库锁以保护待验收版本；coder 已结束本轮修改，tester 可验收。'
+                  : '本任务占用仓库，其他任务需等待本任务释放。',
+            }
+          : null,
+    };
+    const next = (
+      summary: string,
+      action: Handoff['next_action']['action'],
+      actor: string,
+      reason: string,
+    ) => {
+      result.summary = summary;
+      result.next_action = { action, actor, reason };
+    };
+    const block = (code: string, reason: string, actor = 'human') => {
+      result.blockers.push({ code, task_id: task.id, reason });
+      next(reason, 'resolve_blocker', actor, reason);
+    };
+    if (terminal(task))
+      next(
+        `任务已${task.status === 'done' ? '完成' : '取消'}。`,
+        'none',
+        coordinator,
+        'No further work is required.',
+      );
+    else if (task.frozen) block('task_frozen', '任务当前已冻结，需要人工检查后恢复。');
+    else if (worker && !worker.enabled)
+      block('participant_disabled', '当前执行身份已停用，需要人工恢复配置或改派。');
+    else if (worker?.frozen) block('agent_frozen', '当前执行身份已冻结，需要人工恢复。');
+    else if (task.attempt >= this.settings().max_attempts)
+      block('attempt_limit', '返工次数已达上限，需要人工处理。');
+    else if (this.store.get("SELECT 1 FROM approvals WHERE task_id=? AND state='pending'", task.id))
+      next(
+        '任务等待人工审批。',
+        'wait_for_approval',
+        'human',
+        'Resolve the pending approval in Dashboard.',
+      );
+    else if (task.writes_code && !task.repository)
+      block('repository_required', '代码任务尚未绑定仓库，需先确认工作目录。', coordinator);
+    else if (task.writes_code && lock.holder && lock.task_id !== task.id)
+      block('write_lock_held', `仓库正在由任务 T-${lock.task_id} 占用。`, coordinator);
+    else if (!task.workflow_plan && !this.canExecute(task)) {
+      const plan = this.planFor(task)!;
+      if (plan.frozen || terminal(plan))
+        block('plan_unavailable', `父计划 T-${plan.id} 已冻结或结束，当前任务不可执行。`);
+      else if (
+        this.store.get("SELECT 1 FROM approvals WHERE task_id=? AND state='pending'", plan.id)
+      )
+        next(
+          `父计划 T-${plan.id} 等待人工审批。`,
+          'wait_for_approval',
+          'human',
+          `Resolve the pending approval for plan T-${plan.id} in Dashboard.`,
+        );
+      else
+        next(
+          `任务范围等待父计划 T-${plan.id} 批准。`,
+          'request_approval',
+          coordinator,
+          `Submit plan T-${plan.id} for approval; its approval covers this task.`,
+        );
+    } else if (active)
+      next(
+        active.mode === 'review'
+          ? '已派发独立验收；执行者是否启动需由宿主确认。'
+          : '已派发实现；执行者是否启动需由宿主确认。',
+        active.mode === 'review' ? 'review' : 'implement',
+        active.handle,
+        `Use get_task with run_id ${active.id}. The host must check its executor mapping before launching or resuming a worker.`,
+      );
+    else if (task.status === 'in_review')
+      next(
+        `提交${task.submitted_commit_sha ? ` ${task.submitted_commit_sha}` : ''}已接受，等待独立验收。`,
+        'dispatch_review',
+        coordinator,
+        'Dispatch an independent tester, then launch it through the host.',
+      );
+    else if (task.status === 'blocked') {
+      result.blockers.push({
+        code: 'task_blocked',
+        task_id: task.id,
+        reason: '任务已阻塞，需先检查执行现场。',
+      });
+      next(
+        '任务已阻塞，现场与锁保留。',
+        'inspect_and_resume',
+        coordinator,
+        'Confirm the previous executor stopped and resolve the reported problem before dispatching again.',
+      );
+    } else if (task.status === 'changes_requested')
+      next(
+        '独立验收要求返工。',
+        'dispatch_implement',
+        coordinator,
+        'Dispatch the original coder with a new run_id.',
+      );
+    else if (task.status === 'draft' && isGated(this.settings(), 'draft', 'open', task.type))
+      next(
+        '任务范围等待批准。',
+        'request_approval',
+        coordinator,
+        'Submit the completed scope for approval.',
+      );
+    else if (task.status === 'open' || task.status === 'draft') {
+      const waiting = task.depends_on.filter(
+        (id) =>
+          this.store.get<{ status: string }>('SELECT status FROM tasks WHERE id=?', id)?.status !==
+          'done',
+      );
+      if (waiting.length)
+        block('dependencies_incomplete', `等待前置任务：${waiting.join(', ')}。`, coordinator);
+      else if (
+        task.type === 'plan' &&
+        this.store.get(
+          "SELECT 1 FROM tasks WHERE parent_id=? AND status NOT IN ('done','cancelled')",
+          task.id,
+        )
+      )
+        next(
+          '计划已批准，继续推进尚未完成的子任务。',
+          'follow_children',
+          coordinator,
+          'Use pending tasks to dispatch ready work or follow existing workers.',
+        );
+      else
+        next(
+          '任务等待执行。',
+          task.type === 'plan' ? 'complete_plan' : 'dispatch_implement',
+          coordinator,
+          task.type === 'plan'
+            ? 'Complete the plan only after all children finish.'
+            : 'Dispatch a coder and launch it through the host.',
+        );
+    }
+    return result;
+  }
+  private pending(actor: Participant): NonNullable<Identity['pending']> {
+    return this.store
+      .all<{ id: number }>(
+        `SELECT DISTINCT t.id FROM tasks t LEFT JOIN worker_runs r ON r.task_id=t.id
+       WHERE t.status NOT IN ('done','cancelled') AND (t.creator=? OR t.assignee=? OR t.reviewer=? OR r.coordinator=?) ORDER BY t.id`,
+        actor.handle,
+        actor.handle,
+        actor.handle,
+        actor.handle,
+      )
+      .map(({ id }) => ({
+        task_id: id,
+        run_id:
+          this.store.get<{ id: string }>(
+            "SELECT id FROM worker_runs WHERE task_id=? AND state='active'",
+            id,
+          )?.id ?? null,
+        handoff: this.handoff(this.task(id)),
+      }));
   }
   private activeRun(actor: Participant, id: string, mode?: WorkerRun['mode']): WorkerRun {
     const run = this.run(id);
@@ -942,7 +1188,8 @@ export class Board {
         'Follow up the existing worker; stop it before replacing it.',
       );
       this.activeRun(this.participant(existing.handle), existing.id, p.mode);
-      return this.assignment(existing);
+      this.prepareEvidenceDirectory(existing, task);
+      return this.assignment(this.run(existing.id));
     }
     const role = p.mode === 'implement' ? 'implementer' : 'tester';
     const previous = this.store.get<{ kind: string; role: string; enabled: number }>(
@@ -1033,6 +1280,7 @@ export class Board {
       mode: p.mode,
       commit_sha: sha,
     });
+    this.prepareEvidenceDirectory(this.run(id), task);
     return this.assignment(this.run(id));
   }
   private submissionSha(id: number): string | null {
@@ -1073,11 +1321,18 @@ export class Board {
         task.id,
         reason,
         conflict ? ['human', run.coordinator] : [run.coordinator],
+        'system',
+        run.id,
       );
     }
     return this.assignment(this.run(run.id));
   }
-  private workerOperation(actor: Participant, operation: Operation, input: unknown): unknown {
+  private workerOperation(
+    actor: Participant,
+    operation: Operation,
+    input: unknown,
+    evidence: Evidence[] = [],
+  ): unknown {
     const { run_id } = schemas.worker_get_task.parse({
       run_id: (input as { run_id: string }).run_id,
     });
@@ -1119,25 +1374,38 @@ export class Board {
         );
         return this.stopRun(actor, run, `合入冲突：${p.body}`, 'stopped', true);
       }
-      return this.postMessage(actor, {
-        task_id: run.task_id,
-        body: p.body,
-        kind: p.kind,
-        mentions: [],
-      });
+      return this.postMessage(
+        actor,
+        {
+          task_id: run.task_id,
+          body: p.body,
+          kind: p.kind,
+          mentions: [],
+        },
+        run_id,
+      );
     }
     let task: Task;
     if (operation === 'worker_submit') {
       this.activeRun(actor, run_id, 'implement');
       const p = schemas.worker_submit.parse(input);
-      task = this.submit(actor, {
-        id: run.task_id,
-        summary: p.summary,
-        artifacts: [
-          ...p.artifacts,
-          ...(p.commit_sha ? [{ kind: 'commit' as const, ref: p.commit_sha }] : []),
-        ],
-      });
+      task = this.submit(
+        actor,
+        {
+          id: run.task_id,
+          summary: p.summary,
+          artifacts: [
+            ...p.artifacts,
+            ...(p.commit_sha ? [{ kind: 'commit' as const, ref: p.commit_sha }] : []),
+          ],
+        },
+        run_id,
+      );
+      this.store.run(
+        'UPDATE worker_runs SET submitted_commit_sha=? WHERE id=?',
+        p.commit_sha ?? null,
+        run_id,
+      );
     } else {
       this.activeRun(actor, run_id, 'review');
       const p = schemas.worker_review.parse(input);
@@ -1177,8 +1445,13 @@ export class Board {
       } else task = this.review(actor, { id: task.id, verdict: p.verdict, comments: p.comments });
     }
     this.store.run("UPDATE worker_runs SET state='completed' WHERE id=?", run_id);
+    this.store.run(
+      'UPDATE worker_runs SET evidence=? WHERE id=?',
+      JSON.stringify(evidence),
+      run_id,
+    );
     this.store.run('DELETE FROM sessions WHERE id=?', run_id);
-    this.event(actor.handle, 'worker.completed', task.id, { run_id });
+    this.event(actor.handle, 'worker.completed', task.id, { run_id, evidence });
     return this.assignment(this.run(run_id));
   }
   private claim(actor: Participant, id: number): Task {
@@ -1550,7 +1823,7 @@ export class Board {
     });
     return this.task(task.id);
   }
-  private submit(actor: Participant, p: Parsed<'submit_for_review'>): Task {
+  private submit(actor: Participant, p: Parsed<'submit_for_review'>, runId?: string): Task {
     const task = this.task(p.id);
     this.owner(actor, task);
     check(
@@ -1591,10 +1864,11 @@ export class Board {
     this.changeStatus(actor, task, 'in_review', p.summary);
     this.event(actor.handle, 'task.submitted', task.id, {
       commit_sha: p.artifacts.find((a) => a.kind === 'commit')?.ref ?? null,
+      run_id: runId ?? null,
     });
     const reviewers = p.reviewer ? [p.reviewer] : [task.creator];
     if (isGated(this.settings(), 'in_review', 'done', task.type)) reviewers.push('human');
-    this.systemMessage(actor, task.id, `提交验收：${p.summary}`, reviewers, 'handoff');
+    this.systemMessage(actor, task.id, `提交验收：${p.summary}`, reviewers, 'handoff', runId);
     return this.task(task.id);
   }
   private review(actor: Participant, p: Parsed<'review_task'>): Task {
@@ -1846,9 +2120,11 @@ export class Board {
     body: string,
     mentions: string[],
     kind = 'system',
+    runId?: string,
   ): Message {
     return this.insertMessage(actor, {
       taskId,
+      runId,
       channelId: null,
       body,
       kind,
@@ -1924,6 +2200,7 @@ export class Board {
       kind: string;
       mentions: string[];
       replyTo: number | null;
+      runId?: string;
     },
   ): Message {
     let audience: string[] | null = null;
@@ -1962,7 +2239,7 @@ export class Board {
       if (!p.mentions.includes(original.author)) p.mentions.push(original.author);
     }
     const r = this.store.run(
-      'INSERT INTO messages(author,task_id,channel_id,kind,body,reply_to,created_at) VALUES(?,?,?,?,?,?,?)',
+      'INSERT INTO messages(author,task_id,channel_id,kind,body,reply_to,created_at,run_id) VALUES(?,?,?,?,?,?,?,?)',
       actor.handle,
       p.taskId,
       p.channelId,
@@ -1970,6 +2247,7 @@ export class Board {
       p.body,
       p.replyTo,
       this.timestamp(),
+      p.runId ?? null,
     );
     for (const handle of new Set(p.mentions))
       this.store.run(
@@ -1988,7 +2266,7 @@ export class Board {
     );
     return message;
   }
-  private postMessage(actor: Participant, p: Parsed<'post_message'>): Message {
+  private postMessage(actor: Participant, p: Parsed<'post_message'>, runId?: string): Message {
     if (actor.kind === 'agent') {
       const since = new Date(this.now() - 60000).toISOString();
       const count = this.store.get<{ n: number }>(
@@ -2017,6 +2295,7 @@ export class Board {
         p.task_id ?? null,
       ),
       replyTo: p.reply_to ?? null,
+      runId,
     });
   }
   private thread(actor: Participant, p: Parsed<'get_thread'>): Message[] {
@@ -2216,6 +2495,8 @@ export class Board {
   async execute(actor: Participant, operation: Operation, input: unknown): Promise<Envelope> {
     const parsed = schemas[operation].parse(input);
     const write = operations[operation].method !== 'GET';
+    let evidence: Evidence[] = [];
+    let preparedEvidence: PreparedEvidence | undefined;
     // Resolve caller paths outside SQLite transactions. No server-wide current repository exists.
     if ('repository' in parsed && typeof parsed.repository === 'string') {
       if (write) this.writable(this.participant(actor.handle));
@@ -2255,7 +2536,10 @@ export class Board {
         case 'worker_post_message':
         case 'worker_submit':
         case 'worker_review':
-          return this.workerOperation(actor, operation, parsed);
+          return this.workerOperation(actor, operation, parsed, evidence);
+        case 'worker_prepare_evidence':
+          this.activeRun(actor, schemas.worker_prepare_evidence.parse(parsed).run_id);
+          return preparedEvidence;
         case 'join':
         case 'leave':
           throw new Error('Session operations require the HTTP session entry point.');
@@ -2266,6 +2550,7 @@ export class Board {
               (t) => !terminal(t),
             ),
             unread: this.unread(actor.handle),
+            pending: this.pending(actor),
           } satisfies Identity;
         case 'get_overview':
           return this.overview(actor);
@@ -2312,7 +2597,7 @@ export class Board {
           const task = this.task(p.id);
           if (p.include_thread)
             task.thread = this.thread(actor, { task_id: p.id, since: 0, limit: 100 });
-          return task;
+          return { ...task, handoff: this.handoff(task) };
         }
         case 'create_task':
           return this.createTask(actor, schemas.create_task.parse(parsed));
@@ -2505,16 +2790,34 @@ export class Board {
     const finish = (): Envelope => {
       const data = write ? this.transaction(perform) : perform();
       if (!write) return { data };
-      const urgent = this.store.get<{ id: number; body: string; kind: string }>(
-        "SELECT n.id,m.body,m.kind FROM mentions n JOIN messages m ON m.id=n.message_id WHERE n.handle=? AND n.state='unread' ORDER BY (m.kind='question') DESC,n.id LIMIT 1",
+      const notifications = this.store.all<
+        Omit<NonNullable<Envelope['notifications']>[number], 'blocks_current_operation'>
+      >(
+        "SELECT n.id,m.body,m.kind,m.task_id,m.run_id,m.created_at,n.state FROM mentions n JOIN messages m ON m.id=n.message_id WHERE n.handle=? AND n.state='unread' ORDER BY n.id DESC LIMIT 5",
         actor.handle,
       );
       return {
         data,
         unread: this.unread(actor.handle),
-        urgent: urgent ? { ...urgent, body: urgent.body.slice(0, 240) } : null,
+        notifications: notifications.map((n) => ({
+          ...n,
+          body: n.body.slice(0, 240),
+          blocks_current_operation: false as const,
+        })),
+        urgent: null,
       };
     };
+    if (operation === 'worker_prepare_evidence') {
+      const p = schemas.worker_prepare_evidence.parse(parsed);
+      const run = this.activeRun(actor, p.run_id);
+      preparedEvidence = await prepareEvidence(
+        run.evidence_directory ?? this.evidencePath(run.task_id, run.id),
+        run.id,
+        run.commit_sha,
+        p.evidence,
+        this.timestamp(),
+      );
+    }
     if (
       operation === 'worker_submit' ||
       operation === 'worker_review' ||
@@ -2535,6 +2838,20 @@ export class Board {
           : (workerRun?.commit_sha ?? this.submissionSha(task.id));
       const requiresGit =
         operation !== 'worker_review' || schemas.worker_review.parse(parsed).verdict === 'approve';
+      if (workerRun && (operation === 'worker_submit' || operation === 'worker_review')) {
+        const submission =
+          operation === 'worker_submit'
+            ? schemas.worker_submit.parse(parsed)
+            : schemas.worker_review.parse(parsed);
+        evidence = await submissionEvidence(
+          workerRun.evidence_directory ?? this.evidencePath(task.id, workerRun.id),
+          workerRun.id,
+          sha ?? null,
+          submission.evidence,
+          submission.evidence_manifest,
+          this.timestamp(),
+        );
+      }
       if (task.writes_code && requiresGit) {
         check(
           task.repository && sha,

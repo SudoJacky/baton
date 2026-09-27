@@ -956,7 +956,9 @@ describe('repositories selected per task', () => {
     board.store.run('ALTER TABLE tasks DROP COLUMN plan_approved_at');
     board.store.run('ALTER TABLE tasks DROP COLUMN plan_approved_by');
     board.store.run('ALTER TABLE tasks DROP COLUMN workflow_plan');
+    board.store.run('ALTER TABLE participants DROP COLUMN display_name_override');
     board.store.run('PRAGMA user_version=3');
+    board.store.run('ALTER TABLE messages DROP COLUMN run_id');
     board.close();
     board = undefined;
     board = open();
@@ -1070,11 +1072,13 @@ describe('messaging, presence, authentication and replay', () => {
     board.store.run('ALTER TABLE tasks DROP COLUMN plan_approved_at');
     board.store.run('ALTER TABLE tasks DROP COLUMN plan_approved_by');
     board.store.run('ALTER TABLE tasks DROP COLUMN workflow_plan');
+    board.store.run('ALTER TABLE participants DROP COLUMN display_name_override');
     board.store.run('PRAGMA user_version=1');
+    board.store.run('ALTER TABLE messages DROP COLUMN run_id');
     board.close();
     active = undefined;
     board = open(config);
-    expect(board.store.get<{ user_version: number }>('PRAGMA user_version')?.user_version).toBe(5);
+    expect(board.store.get<{ user_version: number }>('PRAGMA user_version')?.user_version).toBe(7);
     expect(() => board.authenticate(agentToken, oldSession)).toThrow();
     expect(board.localHuman().frozen).toBe(false);
     expect(() => board.authenticate(token('dax'))).toThrow();

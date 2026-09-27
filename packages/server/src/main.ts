@@ -14,6 +14,7 @@ const { values } = parseArgs({
     config: { type: 'string' },
     database: { type: 'string' },
     port: { type: 'string' },
+    'evidence-directory': { type: 'string' },
     help: { type: 'boolean' },
   },
 });
@@ -39,6 +40,7 @@ if (values.help) {
       database,
       config,
       agentToken: await ensureLocalAccess(configPath),
+      evidenceDirectory: values['evidence-directory'],
     });
     await chmod(database, 0o600);
     const app = await createApp(board, {

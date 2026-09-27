@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile, readFile, symlink } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { settingsSchema, type Task, type WorkerAssignment, type BoardConfig } from '@baton/shared';
@@ -22,6 +23,8 @@ afterEach(async () => {
   for (const close of closes.splice(0).reverse()) await close();
 });
 async function fixture() {
+  const evidenceDirectory = await mkdtemp(join(tmpdir(), 'baton-workflow-evidence-'));
+  closes.push(() => rm(evidenceDirectory, { recursive: true, force: true }));
   let now = Date.now();
   const verify = vi.fn<(repo: string, sha: string) => Promise<void>>().mockResolvedValue(undefined);
   const board = new Board({
@@ -31,6 +34,7 @@ async function fixture() {
     now: () => now,
     resolveRepository: async (p) => p,
     verifyCommit: verify,
+    evidenceDirectory,
   });
   const app = await createApp(board, { sweepInterval: 1000000 });
   closes.push(async () => {
@@ -147,7 +151,37 @@ it('approves one plan, executes dependent work with separate workers, retries an
   expect(
     (await f.request('planner', 'PATCH', `/tasks/${plan.id}`, { status: 'open' })).status,
   ).toBe(403);
-  await f.approve(plan.id);
+  const handoff = async (id: number) => (await f.ok('planner', 'GET', `/tasks/${id}`)).handoff;
+  expect(await handoff(task.id)).toMatchObject({
+    next_action: { action: 'request_approval', reason: expect.stringContaining(`T-${plan.id}`) },
+  });
+  await f.ok('planner', 'POST', `/tasks/${plan.id}/approval-requests`, {
+    to_status: 'open',
+    reason: 'Scope ready',
+  });
+  expect(await handoff(task.id)).toMatchObject({
+    next_action: { action: 'wait_for_approval', actor: 'human' },
+  });
+  await f.ok('dax', 'POST', `/tasks/${plan.id}/transition`, {
+    status: 'open',
+    reason: 'Approved scope',
+  });
+  expect(await handoff(task.id)).toMatchObject({
+    next_action: { action: 'dispatch_implement' },
+    blockers: [],
+  });
+  expect(await handoff(next.id)).toMatchObject({
+    next_action: { action: 'resolve_blocker' },
+    blockers: [expect.objectContaining({ code: 'dependencies_incomplete' })],
+  });
+  expect((await f.ok('planner', 'GET', '/whoami')).pending).toContainEqual(
+    expect.objectContaining({
+      task_id: task.id,
+      handoff: expect.objectContaining({
+        next_action: expect.objectContaining({ action: 'dispatch_implement' }),
+      }),
+    }),
+  );
   expect(
     (
       await f.request('planner', 'POST', `/tasks/${next.id}/dispatch`, {
@@ -240,6 +274,224 @@ it('approves one plan, executes dependent work with separate workers, retries an
     ).status,
   ).toBe('done');
   expect(f.verify).toHaveBeenCalled();
+});
+
+it('returns a scoped submission receipt while historical freeze notifications remain non-blocking', async () => {
+  const f = await fixture();
+  const plan = await f.plan();
+  const old = await f.child(plan.id);
+  const current = await f.child(plan.id, { repository: resolve('/current-repo') });
+  await f.approve(plan.id);
+  await f.dispatch(old.id, 'implement');
+  await f.ok('dax', 'POST', '/lock/release', {
+    repository: old.repository,
+    reason: 'Old worker has stopped',
+  });
+  await f.ok('dax', 'POST', `/tasks/${old.id}/transition`, {
+    status: 'cancelled',
+    reason: 'Retire old work',
+  });
+  const run = await f.dispatch(current.id, 'implement');
+  const result = await f.request(undefined, 'POST', `/workers/${run.run_id}/submit`, {
+    summary: 'Ready for review',
+    commit_sha: 'a'.repeat(40),
+  });
+  expect(result.status).toBe(200);
+  expect(result.urgent).toBeNull();
+  expect(result.notifications).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        task_id: old.id,
+        body: expect.stringContaining('任务已冻结'),
+        created_at: expect.any(String),
+        state: 'unread',
+        blocks_current_operation: false,
+      }),
+    ]),
+  );
+  expect(result.data).toMatchObject({
+    state: 'completed',
+    submitted_commit_sha: 'a'.repeat(40),
+    commit_sha: 'a'.repeat(40),
+    task: { status: 'in_review', frozen: false },
+    handoff: {
+      blockers: [],
+      next_action: { action: 'dispatch_review', actor: 'planner' },
+      lock: {
+        holder: 'coder',
+        task_id: current.id,
+        purpose: expect.stringContaining('待验收版本'),
+      },
+    },
+  });
+  const identity = await f.ok('planner', 'GET', '/whoami');
+  expect(identity.pending).toContainEqual(
+    expect.objectContaining({
+      task_id: current.id,
+      run_id: null,
+      handoff: expect.objectContaining({
+        next_action: expect.objectContaining({ action: 'dispatch_review' }),
+      }),
+    }),
+  );
+  await f.ok('dax', 'PATCH', `/tasks/${current.id}`, { frozen: true });
+  const frozen = await f.ok(undefined, 'GET', `/workers/${run.run_id}`);
+  expect(frozen.handoff.blockers).toEqual([
+    expect.objectContaining({ task_id: current.id, code: 'task_frozen' }),
+  ]);
+});
+
+it('isolates evidence by run, binds hashes to the reviewed SHA, and preserves prior submissions during rework', async () => {
+  const f = await fixture();
+  const plan = await f.plan();
+  const task = await f.child(plan.id);
+  await f.approve(plan.id);
+  const coder = await f.dispatch(task.id, 'implement');
+  expect((await f.dispatch(task.id, 'implement')).evidence_directory).toBe(
+    coder.evidence_directory,
+  );
+  await writeFile(join(coder.evidence_directory, 'screen.txt'), 'coder snapshot');
+  const submitted = await f.ok(undefined, 'POST', `/workers/${coder.run_id}/submit`, {
+    summary: 'Version one',
+    commit_sha: 'a'.repeat(40),
+    evidence: [
+      {
+        path: 'screen.txt',
+        command: ['node', 'verify.mjs'],
+        exit_code: 0,
+        scope: 'Mock UI only; no live model execution.',
+      },
+    ],
+  });
+  expect(submitted.evidence[0]).toMatchObject({
+    run_id: coder.run_id,
+    commit_sha: 'a'.repeat(40),
+    sha256: createHash('sha256').update('coder snapshot').digest('hex'),
+    size_bytes: 14,
+    command: ['node', 'verify.mjs'],
+    exit_code: 0,
+  });
+  const tester = await f.dispatch(task.id, 'review');
+  expect(tester.evidence_directory).not.toBe(coder.evidence_directory);
+  expect(tester.task.evidence).toEqual(submitted.evidence);
+  await writeFile(join(tester.evidence_directory, 'screen.txt'), 'tester snapshot');
+  const invalid = await f.request(undefined, 'POST', `/workers/${tester.run_id}/review`, {
+    verdict: 'changes_requested',
+    comments: 'Reject foreign evidence',
+    commit_sha: tester.commit_sha,
+    evidence: [{ path: join(coder.evidence_directory, 'screen.txt'), scope: 'Wrong run' }],
+  });
+  expect(invalid.error.code).toBe('evidence_outside_run');
+  await symlink(coder.evidence_directory, join(tester.evidence_directory, 'foreign'), 'junction');
+  expect(
+    (
+      await f.request(undefined, 'POST', `/workers/${tester.run_id}/review`, {
+        verdict: 'changes_requested',
+        comments: 'Reject linked evidence',
+        commit_sha: tester.commit_sha,
+        evidence: [{ path: 'foreign/screen.txt', scope: 'Wrong run via link' }],
+      })
+    ).error.code,
+  ).toBe('evidence_outside_run');
+  expect((await f.ok(undefined, 'GET', `/workers/${tester.run_id}`)).state).toBe('active');
+  const rejected = await f.ok(undefined, 'POST', `/workers/${tester.run_id}/review`, {
+    verdict: 'changes_requested',
+    comments: 'Fix layout',
+    commit_sha: tester.commit_sha,
+    evidence: [{ path: 'screen.txt', scope: 'Independent screenshot inspection' }],
+  });
+  expect(rejected.evidence[0].run_id).toBe(tester.run_id);
+  expect(await readFile(join(coder.evidence_directory, 'screen.txt'), 'utf8')).toBe(
+    'coder snapshot',
+  );
+  const retry = await f.dispatch(task.id, 'implement');
+  expect(retry.submitted_commit_sha).toBeNull();
+  expect(retry.evidence_directory).not.toBe(coder.evidence_directory);
+  await f.submit(retry, 'b'.repeat(40));
+  const previous = await f.ok(undefined, 'GET', `/workers/${coder.run_id}`);
+  expect(previous.submitted_commit_sha).toBe('a'.repeat(40));
+  expect(previous.task.submitted_commit_sha).toBe('b'.repeat(40));
+  expect(previous.evidence).toEqual(submitted.evidence);
+  expect(previous.task.evidence).toHaveLength(2);
+});
+
+it('does not submit or release the lock when evidence is unreadable', async () => {
+  const f = await fixture();
+  const plan = await f.plan();
+  const task = await f.child(plan.id);
+  await f.approve(plan.id);
+  const run = await f.dispatch(task.id, 'implement');
+  const before = f.board.eventCursor();
+  const result = await f.request(undefined, 'POST', `/workers/${run.run_id}/submit`, {
+    summary: 'Missing report',
+    commit_sha: 'a'.repeat(40),
+    evidence: [{ path: 'missing.txt', scope: 'Missing check' }],
+  });
+  expect(result.error.code).toBe('evidence_unreadable');
+  expect(f.board.eventCursor()).toBe(before);
+  expect(await f.ok(undefined, 'GET', `/workers/${run.run_id}`)).toMatchObject({
+    state: 'active',
+    submitted_commit_sha: null,
+    evidence: [],
+    task: { status: 'in_progress' },
+  });
+  expect(f.board.lock(task.repository).holder).toBe('coder');
+});
+
+it('upgrades a populated v6 database without inventing run provenance or losing the task submission', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'baton-handoff-migration-'));
+  closes.push(() => rm(directory, { recursive: true, force: true }));
+  const options = {
+    database: join(directory, 'board.sqlite'),
+    config,
+    agentToken: access,
+    evidenceDirectory: join(directory, 'evidence'),
+  };
+  let board = new Board(options);
+  try {
+    const task = (
+      await board.execute(board.localHuman(), 'create_task', {
+        title: 'Legacy submission',
+        type: 'test',
+      })
+    ).data as Task;
+    const session = board.join(access, { handle: 'planner' }).data.session_id;
+    const coder = (
+      await board.execute(board.authenticate(access, session), 'dispatch_task', {
+        id: task.id,
+        handle: 'coder',
+        mode: 'implement',
+      })
+    ).data as WorkerAssignment;
+    await board.execute(board.workerActor(access, coder.run_id), 'worker_submit', {
+      run_id: coder.run_id,
+      summary: 'Legacy accepted submission',
+      commit_sha: 'a'.repeat(40),
+    });
+    board.store.run('ALTER TABLE worker_runs DROP COLUMN submitted_commit_sha');
+    board.store.run('ALTER TABLE worker_runs DROP COLUMN evidence_directory');
+    board.store.run('ALTER TABLE worker_runs DROP COLUMN evidence');
+    board.store.run('ALTER TABLE messages DROP COLUMN run_id');
+    board.store.run('PRAGMA user_version=6');
+    board.close();
+    board = new Board(options);
+    const restored = (
+      await board.execute(board.workerActor(access, coder.run_id), 'worker_get_task', {
+        run_id: coder.run_id,
+      })
+    ).data as WorkerAssignment;
+    expect(restored).toMatchObject({
+      state: 'completed',
+      submitted_commit_sha: null,
+      evidence: [],
+      task: { status: 'in_review', submitted_commit_sha: 'a'.repeat(40) },
+      handoff: { next_action: { action: 'dispatch_review' } },
+    });
+    const identity = (await board.execute(board.authenticate(access, session), 'whoami', {})).data;
+    expect(identity).toMatchObject({ pending: [expect.objectContaining({ task_id: task.id })] });
+  } finally {
+    board.close();
+  }
 });
 
 it('locks approved scope, prevents self review and keeps shared-directory writers out during review', async () => {
@@ -429,6 +681,9 @@ it('gates optional merge execution and freezes reported conflicts for human reco
   const task = await f.child(plan.id, { type: 'merge' });
   await f.approve(plan.id);
   expect(task.status).toBe('draft');
+  expect((await f.ok('planner', 'GET', `/tasks/${task.id}`)).handoff.next_action.action).toBe(
+    'request_approval',
+  );
   expect(
     (
       await f.request('planner', 'POST', `/tasks/${task.id}/dispatch`, {
@@ -461,7 +716,121 @@ it('gates optional merge execution and freezes reported conflicts for human reco
   await f.ok('dax', 'PUT', '/settings', { merge_approval: false });
   // Turning the gate off must make an existing draft dispatchable without another human action.
   await f.approve(follow.id);
+  expect((await f.ok('planner', 'GET', `/tasks/${auto.id}`)).handoff.next_action.action).toBe(
+    'dispatch_implement',
+  );
   expect((await f.dispatch(auto.id, 'implement', 'coder2')).task.status).toBe('in_progress');
+});
+
+it.each([true, false])(
+  'keeps draft handoff and dispatch aligned with custom publication gate=%s',
+  async (gated) => {
+    const f = await fixture();
+    await f.ok('dax', 'PUT', '/settings', {
+      approval_mode: 'custom',
+      gates: gated ? [{ from: 'draft', to: 'open', types: ['implement'] }] : [],
+    });
+    const task = await f.ok('dax', 'POST', '/tasks', {
+      title: 'Custom draft',
+      type: 'implement',
+      draft: true,
+      repository: resolve('/custom-repo'),
+    });
+    expect((await f.ok('planner', 'GET', `/tasks/${task.id}`)).handoff.next_action.action).toBe(
+      gated ? 'request_approval' : 'dispatch_implement',
+    );
+    if (gated) {
+      expect(
+        (
+          await f.request('planner', 'POST', `/tasks/${task.id}/dispatch`, {
+            mode: 'implement',
+            handle: 'coder',
+          })
+        ).error.code,
+      ).toBe('approval_required');
+    } else expect((await f.dispatch(task.id, 'implement')).state).toBe('active');
+  },
+);
+
+it('previews 19 captured checks and submits and reviews run manifests without weakening task or hash checks', async () => {
+  const f = await fixture();
+  const plan = await f.plan();
+  const task = await f.child(plan.id);
+  await f.approve(plan.id);
+  const coder = await f.dispatch(task.id, 'implement');
+  for (let i = 0; i < 19; i++) {
+    const directory = join(coder.evidence_directory, `check-${i}`);
+    await mkdir(directory);
+    await writeFile(join(directory, 'output.log'), `check ${i}`);
+    await writeFile(
+      join(directory, 'evidence.json'),
+      JSON.stringify({
+        evidence: [
+          {
+            path: join(directory, 'output.log'),
+            scope: `Criterion ${i}`,
+            command: ['node', '--test'],
+            exit_code: i === 0 ? 7 : 0,
+          },
+        ],
+        cwd: task.repository,
+        signal: null,
+      }),
+    );
+  }
+  const prepared = await f.ok(undefined, 'POST', `/workers/${coder.run_id}/evidence`, {});
+  expect(prepared.evidence).toHaveLength(19);
+  expect(prepared.evidence[0]).toMatchObject({
+    run_id: coder.run_id,
+    sha256: expect.any(String),
+    exit_code: 7,
+  });
+  expect((await f.ok(undefined, 'GET', `/workers/${coder.run_id}`)).state).toBe('active');
+  const input = {
+    summary: 'All checks inspected, including failure',
+    commit_sha: 'a'.repeat(40),
+    evidence_manifest: prepared.evidence_manifest,
+  };
+  await writeFile(join(coder.evidence_directory, 'check-0', 'output.log'), 'changed');
+  expect(
+    (await f.request(undefined, 'POST', `/workers/${coder.run_id}/submit`, input)).error.code,
+  ).toBe('evidence_changed');
+  expect(await f.ok(undefined, 'GET', `/workers/${coder.run_id}`)).toMatchObject({
+    state: 'active',
+    task: { status: 'in_progress' },
+    evidence: [],
+  });
+  expect(
+    f.board.store.get('SELECT task_id FROM write_locks WHERE task_id=?', task.id),
+  ).toBeTruthy();
+  await writeFile(join(coder.evidence_directory, 'check-0', 'output.log'), 'check 0');
+  const submitted = await f.ok(undefined, 'POST', `/workers/${coder.run_id}/submit`, input);
+  expect(submitted.evidence).toHaveLength(19);
+  expect(
+    submitted.evidence.every((e: { commit_sha: string }) => e.commit_sha === input.commit_sha),
+  ).toBe(true);
+  expect(
+    (await f.request(undefined, 'POST', `/workers/${coder.run_id}/evidence`, {})).error.code,
+  ).toBe('worker_inactive');
+  const tester = await f.dispatch(task.id, 'review');
+  await writeFile(join(tester.evidence_directory, 'review.txt'), 'Independently checked');
+  const reviewManifest = await f.ok(undefined, 'POST', `/workers/${tester.run_id}/evidence`, {
+    evidence: [{ path: 'review.txt', scope: 'Independent review' }],
+  });
+  const reviewed = await f.ok(undefined, 'POST', `/workers/${tester.run_id}/review`, {
+    verdict: 'approve',
+    comments: 'Independent checks passed',
+    commit_sha: tester.commit_sha,
+    criteria_passed: tester.task.acceptance_criteria.map((c) => c.id),
+    evidence_manifest: reviewManifest.evidence_manifest,
+  });
+  expect(reviewed.task.status).toBe('done');
+  expect(reviewed.evidence).toHaveLength(1);
+  expect(reviewed.evidence[0]).toMatchObject({
+    run_id: tester.run_id,
+    commit_sha: input.commit_sha,
+  });
+  expect(reviewed.task.evidence).toHaveLength(20);
 });
 
 it('rechecks frozen state and run ownership after asynchronous Git verification', async () => {
@@ -516,7 +885,9 @@ it.each(['stock', 'custom'] as const)(
     board.store.run('ALTER TABLE tasks DROP COLUMN plan_approved_at');
     board.store.run('ALTER TABLE tasks DROP COLUMN plan_approved_by');
     board.store.run('ALTER TABLE tasks DROP COLUMN workflow_plan');
+    board.store.run('ALTER TABLE participants DROP COLUMN display_name_override');
     board.store.run('PRAGMA user_version=4');
+    board.store.run('ALTER TABLE messages DROP COLUMN run_id');
     board.close();
     board = new Board({ database, config, agentToken: access });
     closes.push(async () => board.close());
@@ -525,7 +896,7 @@ it.each(['stock', 'custom'] as const)(
       max_attempts: 7,
       gates: old.gates,
     });
-    expect(board.store.get<{ user_version: number }>('PRAGMA user_version')?.user_version).toBe(5);
+    expect(board.store.get<{ user_version: number }>('PRAGMA user_version')?.user_version).toBe(7);
     expect(
       (await board.execute(board.localHuman(), 'get_task', { id: oldPlan.id })).data,
     ).toMatchObject({ status: 'open', workflow_plan: false, plan_approved_at: null });

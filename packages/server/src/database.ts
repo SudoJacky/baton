@@ -54,7 +54,7 @@ export class Store {
       );
       const version = this.get<{ user_version: number }>('PRAGMA user_version')!.user_version;
       if (version === 0) this.transaction(() => this.connection.exec(migration));
-      else if (![1, 2, 3, 4, 5].includes(version))
+      else if (![1, 2, 3, 4, 5, 6, 7].includes(version))
         throw new Error(
           `Unsupported database version ${version}. Upgrade the server before opening this file.`,
         );
@@ -109,6 +109,23 @@ export class Store {
             CREATE UNIQUE INDEX worker_active_task ON worker_runs(task_id) WHERE state='active';
             CREATE INDEX worker_task ON worker_runs(task_id,created_at);
           PRAGMA user_version=5;
+        `),
+        );
+      if (version < 6)
+        this.transaction(() =>
+          this.connection.exec(`
+          ALTER TABLE participants ADD COLUMN display_name_override TEXT;
+          PRAGMA user_version=6;
+        `),
+        );
+      if (version < 7)
+        this.transaction(() =>
+          this.connection.exec(`
+          ALTER TABLE worker_runs ADD COLUMN submitted_commit_sha TEXT;
+          ALTER TABLE worker_runs ADD COLUMN evidence_directory TEXT;
+          ALTER TABLE worker_runs ADD COLUMN evidence TEXT NOT NULL DEFAULT '[]';
+          ALTER TABLE messages ADD COLUMN run_id TEXT;
+          PRAGMA user_version=7;
         `),
         );
     } catch (error) {

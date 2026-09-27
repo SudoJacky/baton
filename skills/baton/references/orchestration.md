@@ -16,6 +16,8 @@
 
 `dispatch_task({session_id,id:任务ID,handle:"coder",mode:"implement"})` 会准备 coder 身份、原子认领/恢复、开工并取得写入锁，返回 `run_id` 和任务上下文。**成功后再调用宿主的 spawn 工具**，把结果交给子 Agent；重复派发同一活跃任务返回同一 run_id，不能据此重复启动模型。
 
+恢复时优先读取 `whoami.pending` 中的任务、活跃 run 与 `handoff.next_action`。接入异常可用 `doctor({session_id})` 或 `doctor({run_id})` 检查身份、仓库及当前 MCP 的续租状态；自检不接管续租。回执中的 `integration.worker_get` 提供实际可运行的 CLI 命令和 argv。交接包以 `run_id + get_task` 为入口，任务已有范围、验收标准、SHA 和证据无需重复抄写；仅补充宿主特有约束。
+
 Codex 有相应工具时，实际创建调用使用下列参数；替换任务包，不仅在提示中写模型名字：
 
 ```json
@@ -63,7 +65,7 @@ coder：
 本轮 run_id=<派发结果>，任务=T-<id>，主协调者=<planner handle>。
 仓库=<task.repository>；范围、验收、命令=<派发上下文>。
 直接使用现有目录与当前分支，不创建 worktree、clone 或任务分支。
-get_task 核对后实现并自测，保留他人改动；提交后用 submit 附完整 commit_sha。
+get_task 核对后实现并自测，保留他人改动；报告写入本轮 evidence_directory。检查完成后用 prepare_evidence 汇总并核对清单，提交后用 submit 附完整 commit_sha 和返回的 evidence_manifest，也可直接附 evidence。
 交接后停止修改，返回服务端状态和证据，不自审或继续派生 Agent。
 ```
 
@@ -73,7 +75,7 @@ tester：
 使用 <绝对路径>/baton/SKILL.md 的四工具 worker 流程。
 本轮 run_id=<独立验收派发结果>，任务=T-<id>，commit_sha=<派发结果>。
 仓库=<同一个 task.repository>；验证依据与命令=<上下文>。
-get_task 核对后在同目录独立验证，测试前后核对 HEAD、干净状态和任务版本。
+get_task 核对后在同目录独立验证，测试前后核对 HEAD、干净状态和任务版本；复验报告写入自己的 evidence_directory，用 prepare_evidence 汇总并核对，再将 evidence_manifest 随 review 提交。verdict 只能是 approve 或 changes_requested。
 不修改实现，不创建副本；异常先报告，不能通过 checkout/reset/stash/clean 改造现场。
 通过用 review 携带全部已核验 criteria_passed，失败直接 changes_requested 并记录可定位证据。
 返回真实服务端状态及检查结果，不再另行申请默认的最终验收审批。
