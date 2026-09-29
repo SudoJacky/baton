@@ -1,5 +1,12 @@
 # Codex App 与 CLI
 
+使用发行包时运行 `npx @sudojacky/baton` 启动服务，复制终端中的 Codex MCP 配置即可；
+也可用 `npx @sudojacky/baton setup --host codex` 单独生成。可选技能通过
+`npx @sudojacky/baton install-skill` 安装，已有技能不会覆盖。
+更多启动选项见 [初次使用](../../README.md#初次使用)。
+源码安装可运行 `node packages/client/dist/launcher.js setup --host codex`，
+使用旧配置时附加 `--config <绝对路径>`。以下保留手动接入方式。
+
 构建 Baton 并启动服务，将 `config.example.toml` 中的 MCP 程序路径和 `agents.yaml` 路径换成本机绝对路径，再合入用户级 Codex MCP 配置。保留其他配置。只配置一次，不填写 token，不设置逐会话的 `BOARD_AGENT` 或 `BOARD_TOKEN`。
 
 配置使用 stdio 的 `command`、`args`；App 和 CLI 可共享用户级 MCP 设置，见 [OpenAI 官方 MCP 说明](https://learn.chatgpt.com/codex/extend/mcp)。在 App 的 MCP 设置中重新加载连接后，新会话即可使用。MCP 读取与指定配置相邻的自动生成接入文件；该文件不存在时先启动 Baton，旧配置先运行 `agent-board --config <path> migrate`。

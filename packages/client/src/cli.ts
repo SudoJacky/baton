@@ -8,8 +8,8 @@ import spawn from 'cross-spawn';
 import notifier from 'node-notifier';
 import { parse, stringify } from 'yaml';
 import { z } from 'zod';
-import { operations, schemas, type BoardConfig, type Mention, type Operation } from '@baton/shared';
-import { ensureLocalAccess, migrateConfig } from '@baton/shared/local';
+import { operations, schemas, type Mention, type Operation } from '@baton/shared';
+import { defaultConfig, ensureLocalAccess, migrateConfig } from '@baton/shared/local';
 import { ApiError } from './api.js';
 import { diagnose, withIntegration } from './integration.js';
 import { captureEvidence } from './evidence-command.js';
@@ -304,19 +304,7 @@ program
   .action(async (_opts, command: Command) => {
     const options = command.optsWithGlobals<Options>();
     const human = String(options.human);
-    const config: BoardConfig = {
-      url: options.url ?? 'http://127.0.0.1:4100',
-      agents: {
-        planner: { role: 'planner' },
-        coder: { role: 'implementer' },
-        tester: { role: 'tester' },
-      },
-      humans: {
-        [human]: {},
-      },
-    };
-    const { configSchema } = await import('@baton/shared');
-    configSchema.parse(config);
+    const config = defaultConfig(human, options.url);
     const target = configPath(options.config);
     await mkdir(dirname(target), { recursive: true, mode: 0o700 });
     await writeFile(target, stringify(config), { flag: 'wx', mode: 0o600 });

@@ -8,6 +8,18 @@ import { configSchema, type BoardConfig } from './index.js';
 const accessSchema = z.object({ token: z.string().min(32) }).strict();
 export const accessPath = (configFile: string) => `${configFile}.access.json`;
 
+export function defaultConfig(human = 'dax', url = 'http://127.0.0.1:4100'): BoardConfig {
+  return configSchema.parse({
+    url,
+    agents: {
+      planner: { role: 'planner' },
+      coder: { role: 'implementer' },
+      tester: { role: 'tester' },
+    },
+    humans: { [human]: {} },
+  });
+}
+
 export async function readLocalAccess(configFile: string): Promise<string> {
   try {
     return accessSchema.parse(JSON.parse(await readFile(accessPath(configFile), 'utf8'))).token;

@@ -1,5 +1,11 @@
 # Claude Code
 
+发行包启动命令为 `npx @sudojacky/baton`，终端会打印完整的 Claude Code MCP JSON。
+也可运行 `npx @sudojacky/baton setup --host claude-code` 单独生成。
+更多启动选项见 [初次使用](../../README.md#初次使用)。
+源码安装使用 `node packages/client/dist/launcher.js setup --host claude-code`；
+指定旧配置时附加 `--config <绝对路径>`。以下保留手动配置方式。
+
 构建并启动 Baton，把 `mcp.example.json` 中的两个路径改成本机绝对路径，合入工具的 MCP 配置。只需配置一次，不传每个 Agent 的 token 或环境身份。
 
 默认采用 [主 Agent 派发流程](../../skills/baton/references/orchestration.md)，worker 使用 run_id 和四个简化工具，MCP 自动续租。需要下方手动协议时，在全局 MCP args 加 `--profile full`。

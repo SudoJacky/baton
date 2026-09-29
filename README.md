@@ -28,20 +28,29 @@ Baton 是一个运行在本机的多 Agent 协作平台，使用 TypeScript 编�
 
 ## 初次使用
 
-第一次使用请走完下面五步。所有命令都在 **Baton 仓库根目录**运行；后面创建任务时填写的是**你实际要开发的 Git 仓库**，两者可以不是同一个目录。
+下面依次介绍启动、接入和第一份计划。Baton 数据与目标代码仓库分开保存；创建任务时填写的是**你实际要开发的 Git 仓库**。
 
 ### 1. 安装、初始化并启动服务
 
-先准备 Node.js 24+、pnpm 11+ 和 Git，拉取本仓库代码后执行：
+**预构建发行包**只需要 Node.js 24+，包含服务端、MCP、Dashboard 和可选技能，无需 pnpm、源码或本机构建。[@sudojacky/baton](https://www.npmjs.com/package/@sudojacky/baton) 已在 npm 发布，运行：
+
+```sh
+npx @sudojacky/baton
+```
+
+首次运行自动创建 `~/.agent-board/agents.yaml` 和数据库，打开看板，并打印已经填好路径的 MCP 配置。保留这个终端；下次运行同一条命令继续使用原有数据。添加 `--no-open` 可跳过打开浏览器。代码任务仍需要 Git。
+
+**从源码运行**时，准备 Node.js 24+、pnpm 11+ 和 Git，在 Baton 仓库根目录执行：
 
 ```sh
 pnpm install
 pnpm build
-pnpm board --config .agent-board/agents.yaml init
-pnpm start --config .agent-board/agents.yaml
+pnpm start
 ```
 
-`init` 只在首次使用时运行，它创建本地用户和 planner、coder、tester 三个角色预设，遇到已有配置会拒绝覆盖。服务启动后保留这个终端不要关闭。服务默认只监听 `127.0.0.1:4100`，数据库位于 `.agent-board/board.sqlite`，任务和会话都会持久保存。
+无需单独 `init`。启动时仅在配置缺失时创建本地用户和 planner、coder、tester 三个角色预设，已有配置原样保留。默认只监听 `127.0.0.1:4100`，数据库位于配置旁的 `board.sqlite`。配置损坏、端口被占用或权限不足都会明确报错，不会重置数据或偷偷切换端口。
+
+已有项目内配置的用户继续运行 `pnpm start --config .agent-board/agents.yaml`。启动器不会搜索或迁移旧配置，请显式指定它，避免打开另一份看板。首次创建配置时可以加 `--port 4200`；已有配置更换端口时须同时修改其中的 `url`。
 
 ### 2. 打开看板，确认工作空间
 
@@ -51,7 +60,20 @@ pnpm start --config .agent-board/agents.yaml
 
 ### 3. 把 Agent 工具接入同一个 Baton
 
-按宿主选择对应说明：[Codex App / CLI](adapters/codex/README.md)、[Claude Code](adapters/claude-code/README.md) 或 [通用 CLI](adapters/generic/README.md)。MCP 只需配置一次，多个角色会话可以共用。
+启动终端已经给出完整 MCP 配置，按宿主复制对应部分并合入已有设置即可。也可单独重新生成：
+
+```sh
+# 发行包安装
+npx @sudojacky/baton setup --host codex
+npx @sudojacky/baton setup --host claude-code
+# 源码安装；使用自定义配置时附加 --config <绝对路径>
+node packages/client/dist/launcher.js setup --host codex
+```
+
+发行版 MCP 固定使用当前 npm 包版本，不依赖临时缓存中的绝对程序路径。更新后重新生成配置并加载 MCP。`setup` 只输出配置，不修改宿主设置。详细说明：[Codex App / CLI](adapters/codex/README.md)、[Claude Code](adapters/claude-code/README.md) 或 [通用 CLI](adapters/generic/README.md)。多个角色会话可以共用一个 MCP。
+
+<details>
+<summary>源码安装的手动 MCP 配置（可选）</summary>
 
 以 Codex 为例，把下面两个路径换成本机的绝对路径，再合入已有的 MCP 配置：
 
@@ -63,12 +85,16 @@ args = ["/absolute/path/to/baton/packages/client/dist/mcp.js", "--config", "/abs
 
 Windows 路径可以写成 `D:/Code/baton/...`。MCP 里的配置路径必须和启动服务时用的文件一致。接入文件由 Baton 自动生成并读取，不用为每个 Agent 单独配置密钥。重新加载宿主的 MCP 连接后，在目标代码仓库里打开 Agent 会话。
 
-可选：把本仓库的整个 `skills/baton` 目录复制到 `~/.codex/skills/baton`，设置了 `CODEX_HOME` 时则放在其 `skills/baton` 下，之后就能用 `$baton` 调用协作流程。技能要求服务已启动、MCP 已接入；单独安装技能不会启动服务。详见 [Agent 使用技能](#agent-使用技能)。
+</details>
+
+可选：运行 `npx @sudojacky/baton install-skill`，源码安装时运行 `node packages/client/dist/launcher.js install-skill`，将随包技能安装到 `~/.codex/skills/baton`；设置了 `CODEX_HOME` 时使用其 `skills/baton`。已有目录会拒绝覆盖，更新前先移走旧目录。之后就能用 `$baton` 调用协作流程。技能要求服务已启动、MCP 已接入；单独安装技能不会启动服务。详见 [Agent 使用技能](#agent-使用技能)。
 
 也可以另开一个终端做服务连通性检查：
 
 ```sh
-pnpm board --config .agent-board/agents.yaml doctor --json
+npx @sudojacky/baton board doctor --json
+# 源码安装
+pnpm board doctor --json
 ```
 
 这条检查不带身份，只能确认服务可访问。Agent 加入后，用返回的 `session_id` 调用 `whoami` 或 `doctor`，才能确认当前身份和接入情况。
@@ -107,16 +133,25 @@ coder 完成实现、自测和 Git 提交后，提交完整的 commit SHA。主 
 
 ### 再次启动与更新
 
-再次使用时运行同一条 `pnpm start --config .agent-board/agents.yaml` 即可，不用重复 `init`，已有任务和会话都会保留。要停止服务，在服务终端按 Ctrl+C。停止服务不会替你停止宿主里正在跑的模型。
+再次使用时运行原来的 `npx @sudojacky/baton` 或 `pnpm start`，自定义配置继续附加相同的 `--config`，不用重复 `init`。已有任务和会话都会保留。要停止服务，在服务终端按 Ctrl+C。停止服务不会替你停止宿主里正在跑的模型。
 
-更新代码后重新运行 `pnpm install` 和 `pnpm build`，再重启服务并刷新页面。改动服务端接口时，只刷新浏览器不会加载新的服务端代码。
+发行包更新用 `npx @sudojacky/baton@latest`，随后重新运行 `setup` 更新 MCP 中固定的版本号。源码更新后重新运行 `pnpm install` 和 `pnpm build`，再重启服务并刷新页面。数据保存在配置目录中，独立于发行包。改动服务端接口时，只刷新浏览器不会加载新的服务端代码。
+
+### 构建与验证发行包
+
+维护者运行 `pnpm package`，生成 `output/npm/sudojacky-baton-<版本>.tgz`；这一步不会发布到 npm。打包只包含明确列出的运行程序、前端产物、技能和许可证，不包含本地配置、数据库或工作文档。可在另一个空目录中验证：
+
+```sh
+npm exec --yes --package=/absolute/path/sudojacky-baton-0.1.0.tgz -- baton --config /absolute/path/test-state/agents.yaml --no-open
+```
+
+npm 包名为 `@sudojacky/baton`，`0.1.0` 已公开发布。本地 tarball 可验证启动和 `baton mcp`；开发未发布的新版本时，其生成的版本化 MCP 配置需要对应 npm 版本已发布。
 
 ## 启动与配置说明
 
 已有构建产物时也可以通过 npm 启动，注意只有 `--` 后面的参数才会传给 Baton：
 
 ```sh
-npm run board -- --config .agent-board/agents.yaml init
 npm run start -- --config .agent-board/agents.yaml
 ```
 
